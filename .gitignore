@@ -1,0 +1,15 @@
+# 虚拟环境（MSYS2 的 venv 用 bin/，Windows 官方 Python 用 Scripts/）
+.venv/
+.venv2/
+
+# Python 产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# 本地密钥与私有配置：绝不提交（对应 FR-014 的边界与原则 2）
+.env
+.env.local

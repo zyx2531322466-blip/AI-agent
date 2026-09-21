@@ -1,0 +1,9 @@
+schema_version: '1'
+name: 项目管理 Agent
+goal: 把项目管理中「想法 → 规范 → 任务 → 执行 → 汇报」的链路交给一个可解释、可复用、跨会话接得上的本地 Agent 接管一部分
+created: '2026-09-13'
+status: active
+learning_goals:
+- SDD：规范驱动开发的完整流程
+- Skill：能力单元的格式与渐进式加载
+- Harness：长任务的会话循环与跨会话交接
