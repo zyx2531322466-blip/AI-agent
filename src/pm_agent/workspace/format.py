@@ -29,7 +29,10 @@ TASKS_FILE = "tasks.md"
 
 REQUIRED_FILES = (PROJECT_FILE, SPEC_FILE)
 OPTIONAL_FILES = (PLAN_FILE, TASKS_FILE)
-DATA_DIRECTORIES = ("evidence", "decisions", "sessions", "reports", "skills", "history")
+
+#: 变更历史目录，由 workspace/changes.py 使用（撤回靠它）
+HISTORY_DIR = "history"
+DATA_DIRECTORIES = ("evidence", "decisions", "sessions", "reports", "skills", HISTORY_DIR)
 
 PROJECT_STATUSES = ("active", "paused", "done")
 SESSION_STATUSES = ("ok", "conflict", "aborted")

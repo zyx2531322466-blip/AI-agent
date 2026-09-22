@@ -3,8 +3,10 @@
 两条约定，后续所有功能都建在它们上面：
 
 1. **读之前先校验**。格式不对就早失败、并说清怎么修（FR-037）。
-2. **写只走这里**。T008 要在写入前加"预览 + 撤回"，所以写入入口
-   必须先收敛成一个地方，否则那条需求会很难做。
+2. **写必须先准备**。T008 之后没有"直接写"这个动作了：想落盘就得先
+   :meth:`Project.prepare_write` 产出 :class:`~pm_agent.workspace.changes.Change`，
+   再由 :meth:`Project.apply` 统一写入并留下可撤回的历史。
+   这样"先出预览"就不是纪律，是类型（FR-034 / FR-035）。
 """
 
 from __future__ import annotations
@@ -13,12 +15,17 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from ..errors import FormatError, WorkspaceError
 from ..templates import render_template
+from . import changes
 from . import format as fmt
+
+if TYPE_CHECKING:
+    from .changes import ApplyResult, Change, UndoResult
 
 
 @dataclass
@@ -81,18 +88,19 @@ class Project:
         done = sum(1 for mark in marks if mark.lower() == "x")
         return len(marks), done
 
-    # ---- 写 ------------------------------------------------------------
+    # ---- 写（预览 → 落盘 → 可撤回，见 changes.py）------------------------
 
-    def write_text(self, relative: str, text: str) -> Path:
-        """写入项目内的一个文件。
+    def prepare_write(self, relative: str, text: str, *, reason: str = "") -> "Change":
+        """准备一次写入：产出预览，**不碰磁盘**（FR-034）。"""
+        return changes.prepare_write(self, relative, text, reason=reason)
 
-        目前是直接写入；T008 会在这里插入"预览 + 撤回"，
-        因此调用方不要绕过这个方法自己写文件。
-        """
-        target = self.path(relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-        return target
+    def apply(self, change: "Change") -> "ApplyResult":
+        """落盘；写入前把原内容存进 ``history/``（FR-035）。"""
+        return changes.apply_change(self, change)
+
+    def undo_last(self) -> "UndoResult":
+        """撤回最近一次尚未撤回的变更。"""
+        return changes.undo_last(self)
 
 
 def load_project_meta(path: Path) -> fmt.ProjectMeta:
@@ -245,5 +253,7 @@ def _write_if_absent(
     if target.exists():
         skipped_items.append(target.name)
         return
-    target.write_text(text, encoding="utf-8")
+    # 按字节写入：文本模式在 Windows 上会把 \n 翻译成 \r\n，那样
+    # "读出来原样写回去"就成了字节级改动——撤回的"完全一致"和无变化判断都会失真。
+    target.write_bytes(text.encode("utf-8"))
     created_items.append(target.name)

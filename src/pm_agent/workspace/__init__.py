@@ -12,11 +12,31 @@ from .handoff import (
     read_latest_handoff,
     write_handoff,
 )
+from .changes import (
+    ApplyResult,
+    Change,
+    ChangeEntry,
+    UndoResult,
+    apply_change,
+    history_entries,
+    prepare_write,
+    read_change_meta,
+    undo_last,
+)
 from .store import Project, create_project
 
 __all__ = [
     "Project",
     "create_project",
+    "Change",
+    "ChangeEntry",
+    "ApplyResult",
+    "UndoResult",
+    "prepare_write",
+    "apply_change",
+    "undo_last",
+    "history_entries",
+    "read_change_meta",
     "Handoff",
     "list_handoffs",
     "new_handoff",

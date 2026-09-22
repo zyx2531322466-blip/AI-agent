@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from pm_agent.cli import app
 from pm_agent.model.openai_compat import API_KEY_ENV, PROVIDER_ENV
+from pm_agent.workspace.store import Project
 
 runner = CliRunner()
 
@@ -19,7 +20,7 @@ runner = CliRunner()
 def test_help_lists_all_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("version", "init", "show", "check", "ask","stage"):
+    for command in ("version", "init", "show", "check", "ask", "stage", "history", "undo"):
         assert command in result.stdout
 
 
@@ -73,6 +74,36 @@ def test_init_with_no_git(tmp_path: Path) -> None:
     assert "跳过" in result.stdout
 
 
+def test_history_on_fresh_project_says_empty(tmp_path: Path) -> None:
+    target = tmp_path / "新的"
+    runner.invoke(app, ["init", str(target), "--name", "n", "--goal", "g", "--no-git"])
+
+    result = runner.invoke(app, ["history", str(target)])
+    assert result.exit_code == 0, result.stdout
+    assert "还没有任何变更记录" in result.stdout
+
+
+def test_history_and_undo_commands(tmp_path: Path) -> None:
+    target = tmp_path / "项目"
+    runner.invoke(app, ["init", str(target), "--name", "n", "--goal", "g", "--no-git"])
+
+    # 制造一次变更（写一个新文件）
+    project = Project.open(target)
+    project.apply(project.prepare_write("notes.md", "内容\n", reason="测试变更"))
+
+    listed = runner.invoke(app, ["history", str(target)])
+    assert listed.exit_code == 0, listed.stdout
+    assert "测试变更" in listed.stdout
+
+    undone = runner.invoke(app, ["undo", str(target)])
+    assert undone.exit_code == 0, undone.stdout
+    assert "notes.md" in undone.stdout
+    assert not (target / "notes.md").exists(), "撤回新建的文件应当把它删掉"
+
+    after = runner.invoke(app, ["history", str(target)])
+    assert "已撤回" in after.stdout
+
+
 def test_check_reports_missing_project(tmp_path: Path) -> None:
     result = runner.invoke(app, ["check", str(tmp_path / "还没有")])
     assert result.exit_code == 1
@@ -114,4 +145,3 @@ def test_ask_without_key_fails_with_actionable_message(
     assert result.exit_code == 1
     assert API_KEY_ENV in result.stdout
     assert "echo" in result.stdout
-

@@ -27,6 +27,7 @@ from .errors import PMAgentError
 from .model import Message, get_provider
 from .workspace import create_project
 from .workspace import format as fmt
+from .workspace.changes import history_entries, read_change_meta
 from .workspace.store import Project
 from .stages import announce
 
@@ -258,3 +259,46 @@ def _git_summary(status: str) -> tuple[str, str, str]:
 def stage(name: str = typer.Argument(..., help="阶段名：specify / plan / tasks / track")) -> None:
     """说明一个阶段的目的、输入与预期产出。"""
     console.print(Text(announce(name)))
+
+
+@app.command()
+@guarded
+def history(
+    path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录"),
+    limit: int = typer.Option(10, "--limit", "-n", help="最多显示多少条"),
+) -> None:
+    """列出变更记录，最近在前。"""
+    project = Project.open(path)
+    entries = history_entries(project)
+    if not entries:
+        console.print("[dim]还没有任何变更记录。[/]")
+        return
+
+    table = Table(title=f"变更记录（共 {len(entries)} 条）")
+    table.add_column("时间", style="cyan", no_wrap=True)
+    table.add_column("状态", no_wrap=True)
+    table.add_column("说明")
+    table.add_column("文件", justify="right", no_wrap=True)
+    for entry in entries[: max(limit, 0)]:
+        meta = read_change_meta(entry)
+        table.add_row(
+            Text(entry.name),
+            Text("已撤回" if meta.get("undone") else "可撤回"),
+            Text(str(meta.get("reason") or "（未写说明）")),
+            Text(f"{len(meta.get('files') or [])} 个"),
+        )
+    console.print(table)
+
+
+@app.command()
+@guarded
+def undo(path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录")) -> None:
+    """撤回最近一次变更。"""
+    project = Project.open(path)
+    result = project.undo_last()
+
+    console.print(label("已撤回", "green", result.entry_dir.name))
+    for item in result.restored:
+        console.print(Text(f"  恢复  {item}"))
+    for item in result.removed:
+        console.print(Text(f"  删除  {item}（写入前它并不存在）"))

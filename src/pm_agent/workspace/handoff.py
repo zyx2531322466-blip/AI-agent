@@ -5,7 +5,8 @@
 1. **落在项目工作区的 ``sessions/`` 里**，一个会话一个文件。文件名就是会话键
    （``YYYY-MM-DD-HH-MM-SS``），所以"按文件名排序"等于"按时间排序"。
 2. **走 ``Project`` 与 ``workspace/files.py``**：不自己实现 frontmatter 解析，
-   也不绕过 ``Project.write_text()`` —— T008 要在那个唯一入口加"预览 + 撤回"。
+   也不绕过 ``Project.prepare_write()`` / ``apply()`` —— 那是 T008 定下的
+   唯一写入路径（先出预览、落盘前留快照、可撤回）。
 3. **引用而非复制**：目标写需求条目编号、决策写文件名，不抄正文。
 4. **空会话也要合法**：三个必需段落都在，内容如实写"无进展"，
    而不是把字段留空（FR-016 要求三要素，FR-033 要求不编造填充内容）。
@@ -354,4 +355,9 @@ def write_handoff(project: Project, handoff: Handoff) -> Path:
             f"这份交接记录已经存在，拒绝覆盖：{relative}",
             hint="用 new_handoff() 生成新的会话键，不要改旧记录",
         )
-    return project.write_text(relative, render_handoff(handoff))
+    # 走 T008 的变更机制：先产出 Change（预览用），再由它统一落盘并留历史
+    change = project.prepare_write(
+        relative, render_handoff(handoff), reason=f"写入交接记录 {handoff.session}"
+    )
+    project.apply(change)
+    return target
