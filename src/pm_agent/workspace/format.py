@@ -32,6 +32,7 @@ OPTIONAL_FILES = (PLAN_FILE, TASKS_FILE)
 DATA_DIRECTORIES = ("evidence", "decisions", "sessions", "reports", "skills", "history")
 
 PROJECT_STATUSES = ("active", "paused", "done")
+SESSION_STATUSES = ("ok", "conflict", "aborted")
 
 # 需求条目编号与任务勾选框的识别规则。
 # 目前只用于"有没有"的粗略判断与统计；正式解析属于 T012 / T018。
