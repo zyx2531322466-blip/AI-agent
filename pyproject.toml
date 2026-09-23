@@ -26,6 +26,10 @@ where = ["src"]
 [tool.setuptools.package-data]
 "pm_agent.templates" = ["*.yaml", "*.md"]
 "pm_agent.stages" = ["*.yaml"]
+"pm_agent.prompts" = ["*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "network: 需要联网并真实调用模型的测试（默认跳过，见 tests/test_specify_live.py）",
+]

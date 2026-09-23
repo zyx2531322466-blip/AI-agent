@@ -24,11 +24,17 @@ from rich.text import Text
 
 from . import __version__
 from .errors import PMAgentError
+from .errors import WorkspaceError
 from .model import Message, get_provider
+from .stages.specify import draft_spec, prepare_spec_change
+from .stages.tasks import draft_coverage, draft_tasks, prepare_tasks_change
 from .workspace import create_project
 from .workspace import format as fmt
 from .workspace.changes import history_entries, read_change_meta
+from .workspace.requirements import requirement_history
+from .workspace.review import confirm_requirement, export_review
 from .workspace.store import Project
+from .workspace.tasks import coverage_gaps, ready_tasks
 from .stages import announce
 
 app = typer.Typer(
@@ -165,7 +171,7 @@ def show(path: Path = typer.Argument(Path("."), help="项目目录，默认当�
     console.print(Text(f"  需求条目：{len(requirement_ids)}{span}"))
     console.print(Text(f"  任务：{done_tasks}/{total_tasks} 已完成"))
     console.print(
-        "[dim]注：这里只是编号统计，正式的需求与任务解析在 T012 / T018。[/]"
+        "[dim]注：需求条目已按规范解析；任务清单仍是编号统计（正式解析在 T018）。[/]"
     )
 
     problems = fmt.warnings(fmt.check_workspace(project.root))
@@ -254,6 +260,27 @@ def _git_summary(status: str) -> tuple[str, str, str]:
     }
     return table.get(status, (status, "git", "dim"))
 
+
+def _show_requirement_history(project: Project, requirement_id: str) -> None:
+    """把某条需求的来龙去脉按时间打出来。"""
+    revisions = requirement_history(project, requirement_id)
+    if not revisions:
+        console.print(f"[dim]没有找到 {requirement_id} 的变更记录。[/]")
+        return
+    if len(revisions) == 1 and revisions[0].time == "（无变更记录）":
+        console.print(f"[dim]history/ 里还没有记录，看不出 {requirement_id} 的历史。[/]")
+        console.print(Text(f"  当前内容：{revisions[0].after}"))
+        return
+    for revision in revisions:
+        console.print(label(revision.time, "cyan", revision.reason or "（未写说明）"))
+        if revision.before is None:
+            console.print(Text(f"  + 出现：{revision.after}"))
+        elif revision.after is None:
+            console.print(Text(f"  - 删除：{revision.before}"))
+        else:
+            console.print(Text(f"  - {revision.before}"))
+            console.print(Text(f"  + {revision.after}"))
+
 @app.command()
 @guarded
 def stage(name: str = typer.Argument(..., help="阶段名：specify / plan / tasks / track")) -> None:
@@ -263,12 +290,164 @@ def stage(name: str = typer.Argument(..., help="阶段名：specify / plan / tas
 
 @app.command()
 @guarded
+def requirements(
+    path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录"),
+    limit: int = typer.Option(20, "--limit", "-n", help="最多显示多少条"),
+) -> None:
+    """列出规范里的需求条目。"""
+    project = Project.open(path)
+    items = project.requirements()
+    if not items:
+        console.print("[dim]规范里还没有需求条目。[/]")
+        return
+
+    table = Table(title=f"需求条目（共 {len(items)} 条）")
+    table.add_column("编号", style="cyan", no_wrap=True)
+    table.add_column("分组")
+    table.add_column("内容")
+    for item in items[: max(limit, 0)]:
+        table.add_row(Text(item.id), Text(item.section or "—"), Text(item.text))
+    console.print(table)
+    if len(items) > limit:
+        console.print(f"[dim]（还有 {len(items) - limit} 条没显示，用 --limit 调整）[/]")
+
+
+@app.command()
+@guarded
+def tasks(
+    path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录"),
+    milestone: Optional[str] = typer.Option(None, "--milestone", "-m", help="只看某个里程碑"),
+    ready: bool = typer.Option(False, "--ready", help="只看现在就能动手的（最小切片）"),
+    coverage: bool = typer.Option(False, "--coverage", help="只看覆盖缺口（FR-010）"),
+) -> None:
+    """列出任务清单；--ready 看能动手的，--coverage 看缺口。"""
+    project = Project.open(path)
+
+    if coverage:
+        console.print(Text(coverage_gaps(project).render()))
+        return
+
+    items = ready_tasks(project) if ready else project.tasks()
+    if milestone:
+        items = [item for item in items if item.milestone == milestone]
+    if not items:
+        console.print("[dim]没有符合条件的任务。[/]")
+        return
+
+    title = f"就绪任务（{len(items)} 个，按优先级排）" if ready else f"任务（共 {len(items)} 个）"
+    table = Table(title=title)
+    table.add_column("编号", style="cyan", no_wrap=True)
+    table.add_column("状态", no_wrap=True)
+    table.add_column("优先级", no_wrap=True)
+    table.add_column("需求", no_wrap=True)
+    table.add_column("动作")
+    for item in items:
+        table.add_row(
+            Text(item.id),
+            Text("完成" if item.done else "未完成"),
+            Text(item.priority or "—"),
+            Text("、".join(item.requirements) or "—"),
+            Text(item.title),
+        )
+    console.print(table)
+
+
+@app.command()
+@guarded
+def specify(
+    path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录"),
+    goal: Optional[str] = typer.Option(
+        None, "--goal", "-g", help="覆盖 project.yaml 里的一句话目标"
+    ),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p", help="模型实现：deepseek（默认）/ openai-compat / echo"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认，直接写入"),
+) -> None:
+    """把目标整理成结构化规范，写入 spec.md（先给预览，确认后才写）。"""
+    project = Project.open(path)
+    impl = get_provider(provider)
+
+    console.print(f"[dim]模型实现：{impl.describe()}[/]")
+    console.print("[dim]正在生成规范，请稍候…[/]")
+
+    draft = draft_spec(project, impl, goal=goal)
+    change = prepare_spec_change(project, draft)
+
+    console.print()
+    console.print(change.render())
+    console.print()
+
+    if not yes and not typer.confirm("写入 spec.md？", default=True):
+        console.print("[yellow]已取消，spec.md 没有任何改动。[/]")
+        return
+
+    result = project.apply(change)
+    console.print(label("已写入", "green", "、".join(result.written)))
+    console.print("[dim]想反悔就 pm-agent undo。[/]")
+
+
+@app.command()
+@guarded
+def breakdown(
+    path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录"),
+    provider: Optional[str] = typer.Option(
+        None, "--provider", "-p", help="模型实现：deepseek（默认）/ openai-compat / echo"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认，直接写入"),
+) -> None:
+    """把规范拆成任务清单，写入 tasks.md（先给预览，确认后才写）。"""
+    project = Project.open(path)
+    requirements = project.requirements()
+    if not requirements:
+        raise WorkspaceError(
+            "规范里还没有需求条目，没法拆解",
+            hint="先跑 pm-agent specify 生成规范，或手工往 spec.md 里写条目",
+        )
+
+    impl = get_provider(provider)
+    console.print(f"[dim]模型实现：{impl.describe()}[/]")
+    console.print(f"[dim]正在把 {len(requirements)} 条需求拆成任务，请稍候…[/]")
+
+    draft = draft_tasks(project, impl)
+    change = prepare_tasks_change(project, draft)
+
+    report = draft_coverage(project, draft)
+    console.print()
+    if report.ok:
+        console.print("[green]覆盖检查：每条需求都有任务为它服务。[/]")
+    else:
+        console.print("[yellow]覆盖缺口（FR-010：只报告，不挡写入）[/]")
+        console.print(Text(report.render()))
+
+    console.print()
+    console.print(change.render())
+    console.print()
+
+    if not yes and not typer.confirm("写入 tasks.md？", default=True):
+        console.print("[yellow]已取消，tasks.md 没有任何改动。[/]")
+        return
+
+    result = project.apply(change)
+    console.print(label("已写入", "green", "、".join(result.written)))
+    console.print("[dim]看能动手的任务：pm-agent tasks --ready。[/]")
+
+
+@app.command()
+@guarded
 def history(
     path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录"),
     limit: int = typer.Option(10, "--limit", "-n", help="最多显示多少条"),
+    requirement: Optional[str] = typer.Option(
+        None, "--requirement", "-r", help="只看某条需求的历史，例如 FR-003"
+    ),
 ) -> None:
-    """列出变更记录，最近在前。"""
+    """列出变更记录，最近在前；加 --requirement 看某条需求的来龙去脉。"""
     project = Project.open(path)
+    if requirement:
+        _show_requirement_history(project, requirement)
+        return
+
     entries = history_entries(project)
     if not entries:
         console.print("[dim]还没有任何变更记录。[/]")
@@ -302,3 +481,56 @@ def undo(path: Path = typer.Argument(Path("."), help="项目目录，默认当�
         console.print(Text(f"  恢复  {item}"))
     for item in result.removed:
         console.print(Text(f"  删除  {item}（写入前它并不存在）"))
+
+
+@app.command()
+@guarded
+def questions(path: Path = typer.Argument(Path("."), help="项目目录，默认当前目录")) -> None:
+    """列出规范里还没答案的问题（FR-004）。"""
+    project = Project.open(path)
+    items = fmt.parse_clarifications(project.spec_text())
+    if not items:
+        console.print("[green]没有待澄清的问题。[/]")
+        return
+
+    table = Table(title=f"待澄清（{len(items)} 条）")
+    table.add_column("来自", style="cyan", no_wrap=True)
+    table.add_column("问题")
+    for item in items:
+        table.add_row(Text(item.source), Text(item.text))
+    console.print(table)
+
+
+@app.command()
+@guarded
+def confirm(
+    requirement_id: str = typer.Argument(..., help="要确认的需求编号，例如 FR-003"),
+    path: Path = typer.Option(Path("."), "--path", "-C", help="项目目录，默认当前目录"),
+) -> None:
+    """确认一条需求：看过了，可以按它去做（FR-006）。
+
+    这是使用者明确发起的小改动（只动 frontmatter 一行），所以打印预览后直接写入，
+    不再二次询问——反悔有 ``pm-agent undo``。
+    """
+    project = Project.open(path)
+    change = confirm_requirement(project, requirement_id)
+    if change.is_noop:
+        console.print(label("无需改动", "yellow", f"{requirement_id} 已经确认过"))
+        return
+    console.print(change.render())
+    project.apply(change)
+    console.print(label("已确认", "green", requirement_id))
+
+
+@app.command()
+@guarded
+def review(
+    path: Path = typer.Option(Path("."), "--path", "-C", help="项目目录，默认当前目录"),
+) -> None:
+    """导出一份给别人看的评审稿（FR-007）。"""
+    project = Project.open(path)
+    change = export_review(project)
+    console.print(label("写往", "cyan", change.entries[0].path))
+    result = project.apply(change)
+    console.print(label("已写出", "green", "、".join(result.written)))
+    console.print("[dim]这份稿子不依赖本工具：直接发给别人读就行。[/]")

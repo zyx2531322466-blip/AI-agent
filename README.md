@@ -16,17 +16,12 @@
 
 ## 当前进度
 
-对应 [tasks.md](./tasks.md) 的 M0：**T002 ~ T005 已完成**，T001 留给你。
+进度以 [tasks.md](./tasks.md) 为准，这里只说结论：
 
-| 任务 | 内容 | 状态 |
-| --- | --- | --- |
-| T002 | 工具仓库骨架 + 依赖管理 + 可运行 CLI | ✅ |
-| T003 | 项目工作区格式定义 + 模板 | ✅ |
-| T004 | 工作区读写层 + 格式校验 | ✅ |
-| T005 | 模型接入接口 + 默认实现 | ✅ |
-| T001 | 写下你对 spec / plan 的 3 个疑问 | ⬜ 见文末 |
-
-`M0` 剩下的 T006 ~ T010（阶段框架、交接记录、预览撤回、失败显式化、测试骨架）还未开始。
+- **M0 骨架已完成**（T002 ~ T010）：CLI、工作区读写、格式校验、模型接入、阶段框架、跨会话交接、写入前预览与撤回。
+- **M1 已完成**（T011 ~ T017）：一句话目标 → 规范 → 按编号引用与修改 → 查来龙去脉 → 逐条确认 → 导出评审稿。
+- **M2 已完成**（T018 ~ T025）：规范 → 任务清单（带依赖与优先级）→ 覆盖缺口检查 → 就绪任务排序；改任务要素与标记完成都要过校验。
+- **还没做**：M3 ~ M9（跨会话交接、可讲解、汇报与风险、能力单元、多项目、演示与试用、变更与决策），以及 T001（你自己的三问，见文末）。
 
 ## 环境
 
@@ -65,11 +60,33 @@
 # 看现状
 .\pm-agent show ..\我的项目
 
+# 列出规范里的需求条目
+.\pm-agent requirements ..\我的项目 --limit 10
+
+# 还有哪些问题没答案 / 逐条确认 / 导出评审稿
+.\pm-agent questions ..\我的项目
+.\pm-agent confirm FR-002 --path ..\我的项目
+.\pm-agent review --path ..\我的项目
+
+# 把规范拆成任务（先给预览与覆盖检查，确认后才写）
+.\pm-agent breakdown ..\我的项目
+
+# 看任务：全部 / 现在能动手的 / 覆盖缺口
+.\pm-agent tasks ..\我的项目
+.\pm-agent tasks ..\我的项目 --ready
+.\pm-agent tasks ..\我的项目 --coverage
+
 # 检查格式（--fix 会自动补建缺失的数据目录）
 .\pm-agent check ..\我的项目 --fix
 
 # 验证模型接入（echo 是离线回声实现，用来跑通流程）
 .\pm-agent ask --provider echo "在吗"
+
+# 让模型把目标整理成规范：先看预览，确认后才写入 spec.md
+.\pm-agent specify ..\我的项目
+
+# 反悔了就撤回最近一次改动
+.\pm-agent undo ..\我的项目
 ```
 
 `init` 的行为有一条硬规则：**已存在的文件一律跳过，绝不覆盖**。所以你可以在一个已经写过 `spec.md` 的目录里安全地执行它——本仓库就是这么初始化的。
@@ -201,17 +218,27 @@ tests/              # 36 个测试
 ## 开发
 
 ```powershell
-.\.venv\bin\python.exe -m pytest -q          # 跑全部测试
+.\.venv\bin\python.exe -m pytest -q          # 跑全部测试（默认离线，不花钱）
 .\.venv\bin\python.exe -m pytest tests/test_store.py -q   # 只跑读写层
+```
+
+**联网测试**（真实调用模型）默认关闭，因为它要联网、要花钱、输出还不完全确定。要跑就显式打开：
+
+```powershell
+$env:PM_AGENT_RUN_NETWORK_TESTS = "1"
+$env:PM_AGENT_CA_BUNDLE = "C:\msys64\etc\pki\ca-trust\extracted\pem\tls-ca-bundle.pem"
+.\.venv\bin\python.exe -m pytest tests/test_specify_live.py -q -s
 ```
 
 改模板（`src/pm_agent/templates/`）时请同步检查 `src/pm_agent/workspace/format.py` 的校验规则：`create_project` 生成完会自检，不一致会直接报错，不会把坏格式留给使用者。
 
 ## 已知限制
 
-- 只有 5 个命令；`specify` / `tasks` / `report` / `skill` / `export` 还没实现（见 tasks.md）。
-- 写入还没有"预览 + 撤回"（T008），目前的写入入口已经收敛到 `Project.write_text`，就是为了那条需求好做。
-- 需求条目与任务清单只是**编号统计**，还没有解析成结构化对象（T012 / T018）。
+- 命令共 15 个：`version` / `init` / `show` / `check` / `ask` / `stage` / `specify` / `requirements` / `questions` / `confirm` / `review` / `breakdown` / `tasks` / `history` / `undo`。`report` / `skill` / `export` 还没实现（见 tasks.md）。
+- 需求条目与任务清单都已**真正解析**（能按编号引用、按依赖排序、查覆盖缺口）。
+- 新增/修改需求条目还没有命令行入口：它通过 `workspace.requirements` 的接口调用（`confirm` 只切换确认状态）。
+- 待澄清只做到"检测与列出"：还没有"逐条追问 → 回答 → 回填规范"的闭环（T013 目前只负责把它摆出来）。
+- `specify` 的校验是**关键词级**的：能拦住漏项和聊天话术，但拦不住"提到了词却没写好内容"。
 - 没有图形界面，演示走命令行。
 
 ## 待你完成：T001

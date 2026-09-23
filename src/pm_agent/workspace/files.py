@@ -68,3 +68,31 @@ def render_markdown(meta: dict[str, Any] | None, body: str) -> str:
         return body + "\n"
     head = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
     return f"{FRONTMATTER_FENCE}\n{head}\n{FRONTMATTER_FENCE}\n\n{body}\n"
+
+
+def set_frontmatter_line(text: str, key: str, value: str) -> str:
+    """在 frontmatter 里设置一个键；没有 frontmatter 就在开头补一个。
+
+    **行级手术**：只动那一行（或插入一行），其余部分逐字不动。
+    先解析再整体重新渲染会把空行、缩进一起重排——"只改该改的"就成了一句空话。
+
+    ``value`` 是已经渲染好的 YAML 片段（例如 ``12``、``[FR-001, FR-002]``）。
+    """
+    trailing = "\n" if text.endswith("\n") else ""
+    lines = text.split("\n")
+    if trailing:
+        lines = lines[:-1]
+
+    if lines and lines[0].strip() == FRONTMATTER_FENCE:
+        for index in range(1, len(lines)):
+            if lines[index].strip() != FRONTMATTER_FENCE:
+                continue
+            for offset in range(1, index):
+                if lines[offset].split(":", 1)[0].strip() == key:
+                    lines[offset] = f"{key}: {value}"
+                    return "\n".join(lines) + trailing
+            lines.insert(index, f"{key}: {value}")
+            return "\n".join(lines) + trailing
+
+    head = [FRONTMATTER_FENCE, f"{key}: {value}", FRONTMATTER_FENCE, ""]
+    return "\n".join([*head, *lines]) + trailing

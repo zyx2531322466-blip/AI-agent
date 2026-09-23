@@ -37,10 +37,43 @@ DATA_DIRECTORIES = ("evidence", "decisions", "sessions", "reports", "skills", HI
 PROJECT_STATUSES = ("active", "paused", "done")
 SESSION_STATUSES = ("ok", "conflict", "aborted")
 
-# 需求条目编号与任务勾选框的识别规则。
-# 目前只用于"有没有"的粗略判断与统计；正式解析属于 T012 / T018。
-REQUIREMENT_ID_RE = re.compile(r"\bFR-\d{3}\b")
-TASK_LINE_RE = re.compile(r"^- \[([ xX])\]", re.MULTILINE)
+# 需求条目：**以 ``- **FR-xxx**`` 开头的一行**，后面是条目正文。
+# 这是隐式约定，写在这里，别让它只活在解析器的正则里。
+REQUIREMENT_LINE_RE = re.compile(r"^- \*\*(?P<req_id>FR-\d{3})\*\*[ \t]*(?P<text>.*)$")
+#: 看起来像条目、但编号不合规的行（FR-1、FR001、FR-0001…）。
+#: 必须报出来——静默忽略会让使用者看着明明有一条、程序却说没有。
+SUSPECT_ENTRY_RE = re.compile(r"^-\s*\*\*FR[^*]*\*\*")
+#: 正文标题，用来判断条目归在哪个分组
+HEADING_RE = re.compile(r"^(?P<level>#{2,3})[ \t]+(?P<title>\S.*?)[ \t]*$")
+#: frontmatter 里的编号水位线：只增不减，防止编号被复用
+WATERMARK_KEY = "next_requirement"
+#: frontmatter 里记录"已逐条确认的条目编号"（FR-006）
+CONFIRMED_KEY = "confirmed"
+#: 待澄清标记：条目正文或列表里出现它，就算一处待澄清（FR-004）
+CLARIFICATION_MARKER = "[待澄清]"
+
+# 任务勾选框的识别规则；正式解析属于 T018
+TASK_LINE_RE = re.compile(
+    r"^- \[(?P<mark>[ xX])\](?P<parallel> \[P\])? "
+    r"\*\*(?P<task_id>T\d{3})\*\*(?P<rest>.*)$"
+)
+#: 看起来像任务、但编号不合规的行（T1、T0001…）——报出来，别静默忽略
+SUSPECT_TASK_RE = re.compile(r"^- \[[ xX]\]\s*(?:\[P\]\s*)?\*\*T[^*]*\*\*")
+#: 行内字段：``**标签**：值``，值到下一个字段或行尾为止
+TASK_FIELD_RE = re.compile(
+    r"\*\*(?P<label>[^*]+)\*\*：(?P<value>.*?)(?=(?:\*\*[^*]+\*\*：)|$)"
+)
+#: 任务行开头括号里的引用，例如（US-2 / FR-008）、（— / —）
+TASK_REFERENCE_RE = re.compile(r"^（(?P<reference>[^）]*)）")
+#: 在引用片段里挑出需求条目编号
+FR_ID_RE = re.compile(r"\bFR-\d{3}\b")
+#: 在引用片段里挑出成功标准编号——任务也可以直接对着验收标准干活
+SC_ID_RE = re.compile(r"\bSC-\d{3}\b")
+#: 任务编号
+TASK_ID_RE = re.compile(r"\bT\d{3}\b")
+
+#: FR-009 要求每个任务都得有的要素（校验与创建都按它来）
+REQUIRED_TASK_FIELDS = ("完成标准", "优先级", "依赖")
 
 LEVEL_ERROR = "error"
 LEVEL_WARN = "warn"
@@ -79,6 +112,266 @@ class ProjectMeta:
             "status": self.status,
             "learning_goals": list(self.learning_goals),
         }
+
+
+@dataclass(frozen=True)
+class Requirement:
+    """一条需求条目——FR-003 说的"规范的最小单元"。
+
+    ``line`` 是它在被解析那段文本里的行号（1 起）。定点修改要用到它，
+    所以它是解析结果的一部分，不是装饰。
+    """
+
+    id: str
+    text: str
+    section: str
+    line: int
+
+
+def parse_requirements(text: str) -> list[Requirement]:
+    """解析出规范里的全部需求条目，按出现顺序。
+
+    只认 ``- **FR-xxx** 内容`` 这种行——正文里提到的编号（"见 FR-014"）
+    不算条目。这比早先那句全文正则统计准确：引用不会被误算成需求。
+    """
+    items: list[Requirement] = []
+    section = ""
+    for number, raw in enumerate(text.split("\n"), start=1):
+        heading = HEADING_RE.match(raw)
+        if heading:
+            section = heading.group("title").strip()
+            continue
+        found = REQUIREMENT_LINE_RE.match(raw)
+        if found:
+            items.append(
+                Requirement(
+                    id=found.group("req_id"),
+                    text=found.group("text").strip(),
+                    section=section,
+                    line=number,
+                )
+            )
+    return items
+
+
+def check_requirements(text: str) -> list[Problem]:
+    """检查条目本身的问题：编号重复、疑似条目但格式不合规。
+
+    两者都是 ``warn``：它们确实说明规范有问题，但不该让项目打不开——
+    否则使用者连 ``show`` 都跑不了，反而看不到问题出在哪。
+    """
+    problems: list[Problem] = []
+
+    seen: dict[str, int] = {}
+    for item in parse_requirements(text):
+        if item.id in seen:
+            problems.append(
+                Problem(
+                    SPEC_FILE,
+                    f"{item.id} 出现了两次（第 {seen[item.id]} 行和第 {item.line} 行）",
+                    "编号是引用锚点，必须唯一；给其中一条换一个新号",
+                    level=LEVEL_WARN,
+                )
+            )
+        else:
+            seen[item.id] = item.line
+
+    for number, raw in enumerate(text.split("\n"), start=1):
+        stripped = raw.strip()
+        if REQUIREMENT_LINE_RE.match(raw) or not SUSPECT_ENTRY_RE.match(stripped):
+            continue
+        problems.append(
+            Problem(
+                SPEC_FILE,
+                f"第 {number} 行看起来是需求条目，但编号不合规：{stripped[:40]}",
+                "编号要写成 FR-001 这样三位数字，否则它不会被当成条目",
+                level=LEVEL_WARN,
+            )
+        )
+    return problems
+
+
+@dataclass(frozen=True)
+class Clarification:
+    """一处待澄清：问题本身 + 它来自哪（条目编号或章节标题）。"""
+
+    text: str
+    source: str
+    line: int
+
+
+def parse_clarifications(text: str) -> list[Clarification]:
+    """扫描规范里的 ``[待澄清]`` 标记。
+
+    两个来源都算：需求条目正文里的标记，以及"待澄清问题"那一节的列表项。
+    只做**读取**：它不生成问题、也不替使用者回答——信息不足时的产出就是问题本身
+    （FR-004：不得自行填补）。
+    """
+    items: list[Clarification] = []
+    section = ""
+    for number, raw in enumerate(text.split("\n"), start=1):
+        heading = HEADING_RE.match(raw)
+        if heading:
+            section = heading.group("title").strip()
+            continue
+        if CLARIFICATION_MARKER not in raw:
+            continue
+        index = raw.find(CLARIFICATION_MARKER)
+        # 行内代码里的标记是在**讨论这个约定**，不是在提问题：
+        # 例如"统一用 `[待澄清]` 标出"。反引号数量为奇数说明它在代码里。
+        if raw.count("`", 0, index) % 2 == 1:
+            continue
+        body = raw[index + len(CLARIFICATION_MARKER) :].strip()
+        body = body.lstrip("*：: -·").strip()
+        if not body:
+            continue
+        found = REQUIREMENT_LINE_RE.match(raw)
+        source = found.group("req_id") if found else (section or "（无标题）")
+        items.append(Clarification(text=body, source=source, line=number))
+    return items
+
+
+@dataclass(frozen=True)
+class Task:
+    """一条任务。字段对应 FR-008（追溯）与 FR-009（三要素）。"""
+
+    id: str
+    title: str
+    done: bool
+    #: 可并行标记（``[P]``）：与同里程碑内其他 [P] 任务没有先后依赖
+    parallel: bool
+    milestone: str
+    #: 括号里的原始引用，例如 ``US-2 / FR-008``、``— / —``
+    reference: str
+    #: 这一行实际写了哪些字段标签——用来区分"写了无"和"根本没写这个字段"
+    fields: frozenset[str]
+    requirements: tuple[str, ...]
+    #: 引用里的成功标准编号（例如 `US-1 / SC-001`）
+    criteria: tuple[str, ...]
+    standard: str
+    priority: str
+    depends_on: tuple[str, ...]
+    evidence: str
+    line: int
+
+    @property
+    def has_source(self) -> bool:
+        """有没有交代来源。
+
+        两种都算交代了：链接到需求条目，或者明确写了 ``—``
+        （基础设施类任务确实不属于任何一条需求）。
+        **漏写**引用才叫找不到来源。
+        """
+        return bool(self.requirements) or bool(self.criteria) or "—" in self.reference
+
+
+def parse_tasks(text: str) -> list[Task]:
+    """解析任务清单。只认 ``- [ ] **T001** …`` 这种行。"""
+    tasks: list[Task] = []
+    milestone = ""
+    for number, raw in enumerate(text.split("\n"), start=1):
+        heading = HEADING_RE.match(raw)
+        if heading:
+            # 只把二级标题当里程碑；### 归它下面管
+            if len(heading.group("level")) == 2:
+                milestone = heading.group("title").strip()
+            continue
+        match = TASK_LINE_RE.match(raw)
+        if not match:
+            continue
+        reference, fields, title = _split_task(match.group("rest"))
+        tasks.append(
+            Task(
+                id=match.group("task_id"),
+                title=title,
+                done=match.group("mark").lower() == "x",
+                parallel=bool(match.group("parallel")),
+                milestone=milestone,
+                reference=reference,
+                fields=frozenset(fields),
+                requirements=tuple(sorted(set(FR_ID_RE.findall(reference)))),
+                criteria=tuple(sorted(set(SC_ID_RE.findall(reference)))),
+                standard=fields.get("完成标准", ""),
+                priority=fields.get("优先级", ""),
+                depends_on=tuple(
+                    sorted(set(TASK_ID_RE.findall(fields.get("依赖", ""))))
+                ),
+                evidence=fields.get("证据", ""),
+                line=number,
+            )
+        )
+    return tasks
+
+
+def check_tasks(text: str) -> list[Problem]:
+    """检查任务清单本身：编号重复、编号不合规、依赖悬空。
+
+    都是 ``warn``——有问题但不该让项目打不开（和需求条目一个道理）。
+    覆盖缺口（FR-010）不在这里：那要同时看需求和任务，属于 workspace/tasks.py。
+    """
+    problems: list[Problem] = []
+    tasks = parse_tasks(text)
+    known = {task.id for task in tasks}
+
+    seen: dict[str, int] = {}
+    for task in tasks:
+        if task.id in seen:
+            problems.append(
+                Problem(
+                    TASKS_FILE,
+                    f"{task.id} 出现了两次（第 {seen[task.id]} 行和第 {task.line} 行）",
+                    "任务编号是引用锚点，必须唯一",
+                    level=LEVEL_WARN,
+                )
+            )
+        else:
+            seen[task.id] = task.line
+        for dependency in task.depends_on:
+            if dependency not in known:
+                problems.append(
+                    Problem(
+                        TASKS_FILE,
+                        f"{task.id} 依赖的 {dependency} 不存在",
+                        "改掉这条依赖，或补上被依赖的任务（FR-012：不出现悬空依赖）",
+                        level=LEVEL_WARN,
+                    )
+                )
+
+    for number, raw in enumerate(text.split("\n"), start=1):
+        stripped = raw.strip()
+        if TASK_LINE_RE.match(raw) or not SUSPECT_TASK_RE.match(stripped):
+            continue
+        problems.append(
+            Problem(
+                TASKS_FILE,
+                f"第 {number} 行看起来是任务，但编号不合规：{stripped[:40]}",
+                "编号要写成 T001 这样三位数字，否则它不会被当成任务",
+                level=LEVEL_WARN,
+            )
+        )
+    return problems
+
+
+def _split_task(rest: str) -> tuple[str, dict[str, str], str]:
+    """拆一行任务：``(引用, {字段: 值}, 动作)``。"""
+    text = rest.strip()
+    reference = ""
+    found = TASK_REFERENCE_RE.match(text)
+    if found:
+        reference = found.group("reference").strip()
+        text = text[found.end() :]
+
+    fields: dict[str, str] = {}
+    first_start: int | None = None
+    for match in TASK_FIELD_RE.finditer(text):
+        if first_start is None:
+            first_start = match.start()
+        # 字段值到下一个字段为止，末尾那个句号是标点、不是内容。
+        # 不剥掉的话 `**优先级**：P1。` 会解析出 "P1。"，按优先级排序就失效了。
+        fields[match.group("label").strip()] = match.group("value").strip().rstrip("。")
+
+    title = text[:first_start] if first_start is not None else text
+    return reference, fields, title.strip().strip("。．.· ").strip()
 
 
 def new_project_meta(
@@ -290,15 +583,18 @@ def check_workspace(root: Path) -> list[Problem]:
         text, read_problem = _read_text(spec_path)
         if read_problem is not None:
             problems.append(read_problem)
-        elif not REQUIREMENT_ID_RE.search(text or ""):
-            problems.append(
-                Problem(
-                    SPEC_FILE,
-                    "没有找到形如 FR-001 的需求条目编号",
-                    "给每条需求编号，任务才能追溯到需求（FR-003）",
-                    level=LEVEL_WARN,
+        else:
+            spec_text = text or ""
+            problems.extend(check_requirements(spec_text))
+            if not parse_requirements(spec_text):
+                problems.append(
+                    Problem(
+                        SPEC_FILE,
+                        "还没有需求条目",
+                        "一条需求写一行：`- **FR-001** 系统 MUST ……`，任务才能追溯到需求（FR-003）",
+                        level=LEVEL_WARN,
+                    )
                 )
-            )
 
     tasks_path = root / TASKS_FILE
     if not tasks_path.is_file():
@@ -309,15 +605,18 @@ def check_workspace(root: Path) -> list[Problem]:
         text, read_problem = _read_text(tasks_path)
         if read_problem is not None:
             problems.append(read_problem)
-        elif not TASK_LINE_RE.search(text or ""):
-            problems.append(
-                Problem(
-                    TASKS_FILE,
-                    "任务清单里没有形如「- [ ]」的条目",
-                    "每个任务写一行复选框，便于标记完成（FR-015）",
-                    level=LEVEL_WARN,
+        else:
+            tasks_text = text or ""
+            problems.extend(check_tasks(tasks_text))
+            if not parse_tasks(tasks_text):
+                problems.append(
+                    Problem(
+                        TASKS_FILE,
+                        "任务清单里还没有任务",
+                        "一条任务写一行：`- [ ] **T001** 做什么。**完成标准**：……`",
+                        level=LEVEL_WARN,
+                    )
                 )
-            )
 
     for name in DATA_DIRECTORIES:
         if not (root / name).is_dir():

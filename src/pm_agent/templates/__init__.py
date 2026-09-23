@@ -18,16 +18,24 @@ def load(name: str) -> str:
     return files(__name__).joinpath(name).read_text(encoding="utf-8")
 
 
-def render_template(name: str, context: dict[str, str]) -> str:
-    """渲染 ``{{key}}`` 占位符。
+def render_text(text: str, context: dict[str, str], *, source: str) -> str:
+    """把 ``{{key}}`` 占位符替换掉；替换完还有残留就报错。
 
-    渲染后若还有没被替换的占位符，直接报错——宁可现在报错，
-    也不要把 ``{{goal}}`` 这样的字符串留在使用者的项目里。
+    抽出来给 ``prompts/`` 复用：占位符规则只该有一处定义，
+    否则两边的行为迟早会分叉。
     """
-    text = load(name)
     for key, value in context.items():
         text = text.replace(f"{PLACEHOLDER_OPEN}{key}{PLACEHOLDER_CLOSE}", value)
     if PLACEHOLDER_OPEN in text:
         leftover = text[text.index(PLACEHOLDER_OPEN) :][:40]
-        raise ValueError(f"模板 {name} 里有未替换的占位符：{leftover}")
+        raise ValueError(f"{source} 里有未替换的占位符：{leftover}")
     return text
+
+
+def render_template(name: str, context: dict[str, str]) -> str:
+    """渲染模板里的占位符。
+
+    渲染后若还有没被替换的占位符，直接报错——宁可现在报错，
+    也不要把 ``{{goal}}`` 这样的字符串留在使用者的项目里。
+    """
+    return render_text(load(name), context, source=f"模板 {name}")

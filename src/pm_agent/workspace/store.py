@@ -72,21 +72,24 @@ class Project:
     def spec_text(self) -> str:
         return self.read_text(fmt.SPEC_FILE)
 
-    def requirement_ids(self) -> list[str]:
-        """规范里出现过的需求条目编号（去重、按编号排序）。
+    def requirements(self) -> list[fmt.Requirement]:
+        """规范里的需求条目（按出现顺序）。"""
+        return fmt.parse_requirements(self.spec_text())
 
-        注意：这是给 ``show`` 用的粗略统计；正式的需求条目解析在 T012。
-        """
-        return sorted(set(fmt.REQUIREMENT_ID_RE.findall(self.spec_text())))
+    def requirement_ids(self) -> list[str]:
+        """需求条目编号（去重、按编号排序）。"""
+        return sorted({item.id for item in self.requirements()})
+
+    def tasks(self) -> list[fmt.Task]:
+        """任务清单里的任务（按出现顺序）。"""
+        if not self.path(fmt.TASKS_FILE).is_file():
+            return []
+        return fmt.parse_tasks(self.read_text(fmt.TASKS_FILE))
 
     def tasks_summary(self) -> tuple[int, int]:
-        """任务清单的 (总数, 已完成数)。正式解析在 T018。"""
-        if not self.path(fmt.TASKS_FILE).is_file():
-            return 0, 0
-        text = self.read_text(fmt.TASKS_FILE)
-        marks = [match.group(1) for match in fmt.TASK_LINE_RE.finditer(text)]
-        done = sum(1 for mark in marks if mark.lower() == "x")
-        return len(marks), done
+        """任务清单的 (总数, 已完成数)。"""
+        items = self.tasks()
+        return len(items), sum(1 for item in items if item.done)
 
     # ---- 写（预览 → 落盘 → 可撤回，见 changes.py）------------------------
 

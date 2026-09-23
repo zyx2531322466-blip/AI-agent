@@ -24,6 +24,20 @@ from .changes import (
     undo_last,
 )
 from .store import Project, create_project
+from .requirements import (
+    RequirementRevision,
+    add_requirement,
+    next_requirement_id,
+    requirement_history,
+    update_requirement,
+)
+from .review import (
+    build_review_document,
+    confirm_requirement,
+    export_review,
+    parse_confirmed,
+    unconfirmed_requirements,
+)
 
 __all__ = [
     "Project",
@@ -37,6 +51,16 @@ __all__ = [
     "undo_last",
     "history_entries",
     "read_change_meta",
+    "add_requirement",
+    "update_requirement",
+    "next_requirement_id",
+    "requirement_history",
+    "RequirementRevision",
+    "confirm_requirement",
+    "unconfirmed_requirements",
+    "parse_confirmed",
+    "build_review_document",
+    "export_review",
     "Handoff",
     "list_handoffs",
     "new_handoff",

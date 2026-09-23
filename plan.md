@@ -350,6 +350,9 @@ M6 的实测方案：用**不引依赖的字符 n-gram 匹配**跑一遍，拿�
 | 2026-09-13 | 无（实现细化） | 模板放在 `src/pm_agent/templates/` 而不是仓库根 `templates/`，作为包数据随程序分发，避免安装后找不到 | T003 的产物位置；仓库根不再有 `templates/` |
 | 2026-09-13 | 无（实现细化） | CLI 增加 `check`（含 `--fix`）与 `show`：格式校验与项目概览是 M0 验证所必需，也是后续阶段的入口 | plan §4.1 的 cli.py 命令清单 |
 | 2026-09-22 | 无（实现细化） | T008 的预览与撤回需要一个能看见的出口，CLI 增加 `history` 与 `undo` 两个命令 | plan §4.1 的 cli.py 命令清单；FR-035 的 UX 落点 |
+| 2026-09-23 | 无（细化 plan §4.1 的组织方式） | `stages/` 下新增 `specify.py`，它要调模型、要写文件，依赖 `model` 与 `workspace`。plan 原本把"阶段说明"和"阶段实现"笼统放在 `stages/`，但那样会误伤"阶段说明只依赖 errors"这条性质 | 约束收敛为 `stages/__init__.py` 只依赖 `errors`；阶段实现分文件放，`import pm_agent.stages` 仍不会拉进模型层 |
+| 2026-09-23 | 无（新增一处格式约定） | T012 约定"编号只增不复用"，因此需要一条**编号水位线**。它放在 `spec.md` 的 frontmatter（`next_requirement`），与 status/version 同属"程序维护的元数据、正文归模型产出"的分工 | 新增 frontmatter 字段；`spec.md` 无 frontmatter 时会被补上一个 |
+| 2026-09-23 | 无（CLI 命名细化） | plan §4.1 的路线图里 `tasks` 是"生成任务清单"那个命令；实际实现里 `tasks` 用来**查看**（带 `--ready` / `--coverage` 两个视图），生成拆给 `breakdown`。理由：查看是高频动作，短名字留给高频动作 | plan §4.1 的 cli.py 命令清单 |
 
 ---
 

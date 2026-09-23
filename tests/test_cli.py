@@ -20,7 +20,23 @@ runner = CliRunner()
 def test_help_lists_all_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("version", "init", "show", "check", "ask", "stage", "history", "undo"):
+    for command in (
+        "version",
+        "init",
+        "show",
+        "check",
+        "ask",
+        "stage",
+        "specify",
+        "requirements",
+        "history",
+        "undo",
+        "questions",
+        "confirm",
+        "review",
+        "tasks",
+        "breakdown",
+    ):
         assert command in result.stdout
 
 
@@ -102,6 +118,19 @@ def test_history_and_undo_commands(tmp_path: Path) -> None:
 
     after = runner.invoke(app, ["history", str(target)])
     assert "已撤回" in after.stdout
+
+
+def test_specify_with_echo_fails_and_writes_nothing(tmp_path: Path) -> None:
+    """回声实现的输出不能被当成规范写进去（离线可跑的失败路径）。"""
+    target = tmp_path / "规范项目"
+    runner.invoke(app, ["init", str(target), "--name", "n", "--goal", "g", "--no-git"])
+    before = (target / "spec.md").read_bytes()
+
+    result = runner.invoke(app, ["specify", str(target), "--provider", "echo", "--yes"])
+
+    assert result.exit_code == 1
+    assert "回声" in result.stdout
+    assert (target / "spec.md").read_bytes() == before, "失败时不能留下半成品"
 
 
 def test_check_reports_missing_project(tmp_path: Path) -> None:
