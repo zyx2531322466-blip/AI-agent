@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 
 from ..errors import WorkspaceError
@@ -171,6 +172,7 @@ def update_task(
     priority: str | None = None,
     depends_on: tuple[str, ...] | list[str] | None = None,
     evidence: str | None = None,
+    conclusion: str | None = None,
     reason: str = "调整任务",
 ) -> Change:
     """产出一份"改任务要素"的变更（**不落盘**）。
@@ -204,42 +206,149 @@ def update_task(
         line = _set_field(line, "依赖", "、".join(depends_on) or "无")
     if evidence is not None:
         line = _set_field(line, "证据", evidence or "无")
+    if conclusion is not None:
+        line = _set_field(line, "结论", conclusion or "无")
     lines[index] = line
     return project.prepare_write(fmt.TASKS_FILE, "\n".join(lines), reason=reason)
 
 
-def complete_task(
-    project: Project, task_id: str, *, evidence: str = "", reason: str = ""
+def set_task_status(
+    project: Project,
+    task_id: str,
+    status: str,
+    *,
+    evidence: str | None = None,
+    moment: dt.datetime | None = None,
+    reason: str = "",
 ) -> Change:
-    """产出一份"把任务标记完成"的变更（**不落盘**）。
+    """产出一份"改任务状态"的变更（**不落盘**）。
 
-    **没有证据就不产出变更**（FR-014）：只勾一个框不算完成。证据是"别人能去看的
-    东西"——代码变更、文档、可运行的结果、评审结论。
+    四种状态：未开始 / 进行中 / 阻塞 / 完成（FR-015）。同时记下**变更时间**。
+
+    **标成「完成」时必须有证据**（FR-014）：只勾一个框不算完成。证据是
+    "别人能去看的东西"——代码变更、文档、可运行的结果、评审结论。
+
+    勾选框是状态的**视图**：改状态时一并改齐，免得两处说的不一致。
     """
+    if status not in fmt.TASK_STATUSES:
+        raise WorkspaceError(
+            f"没有这个状态：{status}", hint=f"可选：{'、'.join(fmt.TASK_STATUSES)}"
+        )
+
     raw = project.read_text(fmt.TASKS_FILE)
     tasks = {task.id: task for task in fmt.parse_tasks(raw)}
     if task_id not in tasks:
         raise WorkspaceError(f"任务清单里没有 {task_id}", hint="先确认任务编号")
 
     task = tasks[task_id]
-    final_evidence = evidence.strip() or task.evidence.strip()
-    if not final_evidence or final_evidence == "无":
+    final_evidence = (evidence or "").strip() or task.evidence.strip()
+    if status == "完成" and (not final_evidence or final_evidence == "无"):
         raise WorkspaceError(
             f"{task_id} 还没有完成证据，不能标记完成（FR-014）",
             hint="给出证据（代码变更 / 文档 / 可运行结果 / 评审结论），或者先别勾",
         )
 
+    stamp = (moment or dt.datetime.now()).strftime("%Y-%m-%d %H:%M")
     lines = raw.split("\n")
     index = task.line - 1
     line = lines[index]
-    if evidence.strip():
+    line = _set_field(line, "状态", status)
+    line = _set_field(line, "更新", stamp)
+    if (evidence or "").strip():
         line = _set_field(line, "证据", evidence.strip())
-    if line.startswith("- [ ]"):
+    if line.startswith("- [ ]") and status == "完成":
         line = "- [x]" + line[len("- [ ]") :]
+    elif line.startswith("- [x]") and status != "完成":
+        line = "- [ ]" + line[len("- [x]") :]
     lines[index] = line
     return project.prepare_write(
-        fmt.TASKS_FILE, "\n".join(lines), reason=reason or f"完成 {task_id}"
+        fmt.TASKS_FILE, "\n".join(lines), reason=reason or f"{task_id} → {status}"
     )
+
+
+def complete_task(
+    project: Project, task_id: str, *, evidence: str = "", reason: str = ""
+) -> Change:
+    """``set_task_status(..., "完成")`` 的简写。"""
+    return set_task_status(
+        project, task_id, "完成", evidence=evidence, reason=reason
+    )
+
+
+@dataclass(frozen=True)
+class StatusUpdate:
+    """从一句话里读出来的意思——FR-019 说的"归属判断"。"""
+
+    task: fmt.Task
+    status: str
+    evidence: str = ""
+
+
+#: 状态关键词。顺序有讲究：先看否定与阻塞，再看完成，最后才是进行中。
+_STATUS_WORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("未开始", ("没开始", "未开始", "还没动", "todo")),
+    ("阻塞", ("阻塞", "卡住", "卡在", "等接口", "等依赖", "blocked", "waiting")),
+    ("完成", ("做完", "完成", "搞定", "好了", "done")),
+    ("进行中", ("在做", "进行中", "继续", "开始", "doing")),
+)
+
+#: 中文的否定很难用关键词搞定，这里只挡住最常见的一句
+_NEGATED_DONE = ("没做完", "还没做完", "没搞完")
+
+#: 标题匹配的最低重叠度：至少要共享两个字符片段
+_MIN_OVERLAP = 2
+
+
+def parse_status_update(project: Project, sentence: str) -> StatusUpdate | None:
+    """从一句话里认出：说的是哪个任务、要改成什么状态、证据是什么（FR-019）。
+
+    归属判断先用**任务编号**（最省事、最不容易错），再用**标题包含**匹配。
+    认不出来就返回 ``None``——**宁可问，不要猜**。
+
+    这是规则式的最佳努力，不是模型：所以 FR-019 才要求**回显确认**，
+    认错了由人当场拦住。
+    """
+    text = sentence.strip()
+    tasks = project.tasks()
+
+    target: fmt.Task | None = None
+    found = fmt.TASK_ID_RE.findall(text)
+    if found:
+        target = next((task for task in tasks if task.id == found[0]), None)
+        if target is None:
+            return None
+    else:
+        # 用字符 bigram 重叠挑最像的那个任务。
+        # 为什么不直接 `title in text`：任务是"做回看页"，人说的是"回看页这块卡住了"——
+        # 中文没有空格，整串包含匹配太脆（这就是 plan §11 里说的那个分词问题，
+        # 这里先用不引依赖的最简办法，够用就不过度设计）。
+        scored = sorted(
+            ((fmt.bigram_overlap(text, task.title), task) for task in tasks),
+            key=lambda pair: (-pair[0], pair[1].id),
+        )
+        if scored and scored[0][0] >= _MIN_OVERLAP:
+            target = scored[0][1]
+    if target is None:
+        return None
+
+    if any(word in text for word in _NEGATED_DONE):
+        return StatusUpdate(task=target, status="进行中")
+
+    status = ""
+    for candidate, words in _STATUS_WORDS:
+        if any(word in text for word in words):
+            status = candidate
+            break
+    if not status:
+        return None
+
+    evidence = ""
+    for marker in ("证据：", "证据:", "提交", "commit"):
+        if marker in text:
+            tail = text.split(marker, 1)[1].strip()
+            evidence = f"{marker} {tail}" if marker in ("提交", "commit") else tail
+            break
+    return StatusUpdate(task=target, status=status, evidence=evidence)
 
 
 def _insert_position(lines: list[str], milestone: str | None) -> int:

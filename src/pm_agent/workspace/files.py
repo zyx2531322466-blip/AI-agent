@@ -70,6 +70,29 @@ def render_markdown(meta: dict[str, Any] | None, body: str) -> str:
     return f"{FRONTMATTER_FENCE}\n{head}\n{FRONTMATTER_FENCE}\n\n{body}\n"
 
 
+def strip_code_fence(text: str) -> str:
+    """去掉最外层的一对代码围栏（如果有）。"""
+    fence = "`" * 3
+    stripped = text.strip()
+    if not (stripped.startswith(fence) and stripped.endswith(fence)):
+        return text
+    first_newline = stripped.find("\n")
+    if first_newline == -1:
+        return text
+    return stripped[first_newline + 1 : -len(fence)]
+
+
+def clean_model_reply(reply: str) -> str:
+    """把模型回复清理成干净的正文：剥掉它自作主张加的 frontmatter 与最外层围栏。
+
+    模型常干这两件多余的事，而两者混进落盘的文件里都会让人看到不该有的东西。
+    抽在这里是因为**不只一个阶段要用**（specify 与 work 都要），
+    规则只该有一处定义，否则两边的清理行为迟早分叉。
+    """
+    _, body, _ = split_frontmatter(reply)
+    return strip_code_fence(body).strip("\n") + "\n"
+
+
 def set_frontmatter_line(text: str, key: str, value: str) -> str:
     """在 frontmatter 里设置一个键；没有 frontmatter 就在开头补一个。
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,71 @@ def test_version_prints_number() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "pm-agent" in result.stdout
+
+
+# ---- 文档里的命令必须真能敲（T072 走查的产物） -------------------------------
+#
+# 走查时踩到三次同一类错：文档写了一条敲不通的命令。
+#   * `guide` 里写 `pm-agent demo`，但仓库根目录没有 `pm-agent` 这个文件；
+#   * README 同一个写法，一整段都敲不通；
+#   * README 写 `pm-agent review --path X`，而 `review` 的项目目录是**位置参数**，
+#     `--path` 直接是 "No such option"。
+# 靠人眼盯不住，所以这里拿 Typer 自己注册的命令与参数**逐条对账**。
+
+#: 要一起对账的文档（都是给人照着敲的）
+GUIDED_DOCS = ("README.md", "演示脚本.md", "简历材料.md", "使用指南.md")
+
+
+def _command_names() -> set[str]:
+    return {
+        command.name or command.callback.__name__.replace("_", "-")
+        for command in app.registered_commands
+    }
+
+
+def _accepted_flags(command: str) -> set[str]:
+    """拿该命令的 `--help` 当账本——它就是给使用者看的那份参数说明。"""
+    result = runner.invoke(app, [command, "--help"])
+    assert result.exit_code == 0, f"{command} --help 都跑不起来"
+    return set(re.findall(r"--[a-z][a-z-]*", result.stdout))
+
+
+@pytest.mark.parametrize("doc", GUIDED_DOCS)
+def test_documented_commands_are_real(doc: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    text = (root / doc).read_text(encoding="utf-8")
+    known = _command_names()
+
+    assert ".\\pm-agent" not in text, (
+        f"{doc} 里写了 `.\\pm-agent`：仓库根目录没有这个文件，"
+        "要么写全路径 `.\\\\.venv\\\\bin\\\\pm-agent.exe`，要么用 `pm-agent`"
+    )
+
+    seen = 0
+    for number, line in enumerate(text.split("\n"), start=1):
+        stripped = line.strip()
+        # 文档里两种写法都算：直接敲 `pm-agent …`，或者先定义 $pm 再 `& $pm …`
+        parts = stripped.split()
+        if stripped.startswith("pm-agent "):
+            command = parts[1]
+        elif stripped.startswith("& $pm ") and len(parts) > 2:
+            command = parts[2]
+        else:
+            continue
+        where = f"{doc} 第 {number} 行"
+        assert command in known, f"{where}：没有 {command} 这个命令"
+        accepted: set[str] | None = None
+        for token in parts[2:]:
+            if not token.startswith("--"):
+                continue
+            flag = token.split("=", 1)[0]
+            accepted = _accepted_flags(command) if accepted is None else accepted
+            assert flag in accepted, (
+                f"{where}：{command} 不接受 {flag}"
+                f"（它接受：{'、'.join(sorted(accepted))}）"
+            )
+        seen += 1
+    assert seen, f"{doc} 里一条命令都没扫到，多半是格式变了"
 
 
 def test_init_then_check_then_show(tmp_path: Path) -> None:

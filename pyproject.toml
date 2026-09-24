@@ -27,6 +27,7 @@ where = ["src"]
 "pm_agent.templates" = ["*.yaml", "*.md"]
 "pm_agent.stages" = ["*.yaml"]
 "pm_agent.prompts" = ["*.md"]
+"pm_agent.skills" = ["*/SKILL.md", "*/reference/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

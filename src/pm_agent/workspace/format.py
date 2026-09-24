@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..errors import FormatError
+from .files import split_frontmatter
+
 SCHEMA_VERSION = "1"
 SUPPORTED_SCHEMA_VERSIONS = frozenset({SCHEMA_VERSION})
 
@@ -30,9 +33,35 @@ TASKS_FILE = "tasks.md"
 REQUIRED_FILES = (PROJECT_FILE, SPEC_FILE)
 OPTIONAL_FILES = (PLAN_FILE, TASKS_FILE)
 
+#: 交付物与证据的存放目录：AI 执行任务的产出（FR-053）与完成证据（FR-014）都落这里
+EVIDENCE_DIR = "evidence"
 #: 变更历史目录，由 workspace/changes.py 使用（撤回靠它）
 HISTORY_DIR = "history"
-DATA_DIRECTORIES = ("evidence", "decisions", "sessions", "reports", "skills", HISTORY_DIR)
+#: 能力单元目录：内置的随程序走，项目自己沉淀的放这里
+SKILLS_DIR = "skills"
+DATA_DIRECTORIES = (
+    EVIDENCE_DIR,
+    "decisions",
+    "sessions",
+    "reports",
+    SKILLS_DIR,
+    HISTORY_DIR,
+)
+
+#: 一个能力单元 = 一个目录，里面是 SKILL.md（+ 可选的 reference/）
+SKILL_FILE = "SKILL.md"
+SKILL_REFERENCE_DIR = "reference"
+
+#: FR-026 的六要素 + FR-050 的 why。**步骤要点不在这里——它就是正文本身。**
+SKILL_REQUIRED_FIELDS = (
+    "name",
+    "description",
+    "when_to_use",
+    "when_not_to_use",
+    "inputs",
+    "outputs",
+    "why",
+)
 
 PROJECT_STATUSES = ("active", "paused", "done")
 SESSION_STATUSES = ("ok", "conflict", "aborted")
@@ -75,6 +104,9 @@ TASK_ID_RE = re.compile(r"\bT\d{3}\b")
 #: FR-009 要求每个任务都得有的要素（校验与创建都按它来）
 REQUIRED_TASK_FIELDS = ("完成标准", "优先级", "依赖")
 
+#: FR-015 要求的四种任务状态
+TASK_STATUSES = ("未开始", "进行中", "阻塞", "完成")
+
 LEVEL_ERROR = "error"
 LEVEL_WARN = "warn"
 
@@ -102,9 +134,13 @@ class ProjectMeta:
     created: str
     status: str
     learning_goals: list[str] = field(default_factory=list)
+    #: 已经处置过的风险（FR-023）：处置过的同类预警不再重复提醒
+    acknowledged_risks: list[str] = field(default_factory=list)
+    #: 能力单元的采纳记录（FR-028）：每项含 name / outcome / at
+    skill_usage: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "schema_version": self.schema_version,
             "name": self.name,
             "goal": self.goal,
@@ -112,6 +148,12 @@ class ProjectMeta:
             "status": self.status,
             "learning_goals": list(self.learning_goals),
         }
+        # 空的不写进文件：project.yaml 是给人看的，没内容就别占一行
+        if self.acknowledged_risks:
+            data["acknowledged_risks"] = list(self.acknowledged_risks)
+        if self.skill_usage:
+            data["skill_usage"] = [dict(item) for item in self.skill_usage]
+        return data
 
 
 @dataclass(frozen=True)
@@ -128,6 +170,52 @@ class Requirement:
     line: int
 
 
+#: Markdown 的注释标记。注释里的内容是**写给读文档的人看的说明**，不是文档内容。
+COMMENT_OPEN = "<!--"
+COMMENT_CLOSE = "-->"
+
+
+def blank_comments(text: str) -> str:
+    """把 HTML 注释里的字符抹成空格，**行数与行号逐字不变**。
+
+    为什么要有这一步：我们自己的模板里就带着示例条目
+    （``<!-- 示例：- **FR-001** 系统 MUST …… -->``）。注释必须整段不算内容，
+    否则一份刚 ``init`` 出来的空项目会在 ``show`` 里立刻报"看起来是需求条目，
+    但编号不合规"——而那句话正是我们自己写进去的示例。使用者把自己不要的条目
+    注释掉也是同一个道理：注释掉就该当它不存在。
+
+    抹成空格而不是删掉，是因为解析结果里的 ``line`` 要用来做行级手术
+    （定点改一条需求、把新任务插在某个里程碑下）。行号一旦偏移，
+    改的就不是那一行了。
+    """
+    lines: list[str] = []
+    inside = False
+    for line in text.split("\n"):
+        if not inside and COMMENT_OPEN not in line:
+            lines.append(line)
+            continue
+        chars = list(line)
+        index = 0
+        while index < len(chars):
+            if not inside and line.startswith(COMMENT_OPEN, index):
+                inside = True
+                for position in range(index, index + len(COMMENT_OPEN)):
+                    chars[position] = " "
+                index += len(COMMENT_OPEN)
+                continue
+            if inside:
+                if line.startswith(COMMENT_CLOSE, index):
+                    inside = False
+                    for position in range(index, index + len(COMMENT_CLOSE)):
+                        chars[position] = " "
+                    index += len(COMMENT_CLOSE)
+                    continue
+                chars[index] = " "
+            index += 1
+        lines.append("".join(chars))
+    return "\n".join(lines)
+
+
 def parse_requirements(text: str) -> list[Requirement]:
     """解析出规范里的全部需求条目，按出现顺序。
 
@@ -136,7 +224,7 @@ def parse_requirements(text: str) -> list[Requirement]:
     """
     items: list[Requirement] = []
     section = ""
-    for number, raw in enumerate(text.split("\n"), start=1):
+    for number, raw in enumerate(blank_comments(text).split("\n"), start=1):
         heading = HEADING_RE.match(raw)
         if heading:
             section = heading.group("title").strip()
@@ -176,7 +264,7 @@ def check_requirements(text: str) -> list[Problem]:
         else:
             seen[item.id] = item.line
 
-    for number, raw in enumerate(text.split("\n"), start=1):
+    for number, raw in enumerate(blank_comments(text).split("\n"), start=1):
         stripped = raw.strip()
         if REQUIREMENT_LINE_RE.match(raw) or not SUSPECT_ENTRY_RE.match(stripped):
             continue
@@ -189,6 +277,79 @@ def check_requirements(text: str) -> list[Problem]:
             )
         )
     return problems
+
+
+@dataclass(frozen=True)
+class SkillMeta:
+    """能力单元的**元数据**——只有元数据，没有正文（T047 的第一级）。
+
+    会话开始时只需要把它放进上下文：让 Agent 知道"有这么个做法、什么时候用"，
+    等真要用的时候再去读正文（第二级）、读引用文件（第三级）。
+    """
+
+    name: str
+    description: str
+    when_to_use: str
+    when_not_to_use: str
+    inputs: str
+    outputs: str
+    why: str
+    version: str
+    #: "内置" 还是 "项目"
+    source: str
+    #: SKILL.md 所在位置，读正文时用
+    path: Path
+
+    def one_line(self) -> str:
+        """放进上下文的**一行**。整段正文不该出现在这里。"""
+        return f"{self.name}：{self.description}（适用：{self.when_to_use}）"
+
+
+def parse_skill_meta(
+    text: str, *, source: str, path: Path
+) -> SkillMeta:
+    """解析 SKILL.md 的元数据；缺要素就报错（FR-026）。
+
+    正文（步骤要点）另算：它不能为空，而且至少要有一条列表项——
+    "步骤要点"就是这个能力单元正文该有的样子。
+    """
+    meta, body, has_frontmatter = split_frontmatter(text)
+    where = f"{SKILLS_DIR}/{path.name}/{SKILL_FILE}"
+
+    if not has_frontmatter:
+        raise FormatError(
+            f"{where} 缺少 frontmatter",
+            hint="文件开头要有两行 --- 包住的元数据；对照内置能力单元看格式",
+        )
+
+    missing = [field for field in SKILL_REQUIRED_FIELDS if not str(meta.get(field) or "").strip()]
+    if missing:
+        raise FormatError(
+            f"{where} 缺要素：{'、'.join(missing)}",
+            hint=(
+                "FR-026 要求六要素齐全（name / description / when_to_use / "
+                "when_not_to_use / inputs / outputs），FR-050 还要求 why"
+            ),
+        )
+
+    if "- " not in body:
+        raise FormatError(
+            f"{where} 的正文里没有步骤要点",
+            hint="正文至少要写成一条条要点，用「- 」开头",
+        )
+
+    return SkillMeta(
+        name=str(meta["name"]).strip(),
+        description=str(meta["description"]).strip(),
+        when_to_use=str(meta["when_to_use"]).strip(),
+        when_not_to_use=str(meta["when_not_to_use"]).strip(),
+        inputs=str(meta["inputs"]).strip(),
+        outputs=str(meta["outputs"]).strip(),
+        why=str(meta["why"]).strip(),
+        version=str(meta.get("version") or "1").strip(),
+        source=source,
+        path=path,
+    )
 
 
 @dataclass(frozen=True)
@@ -209,7 +370,7 @@ def parse_clarifications(text: str) -> list[Clarification]:
     """
     items: list[Clarification] = []
     section = ""
-    for number, raw in enumerate(text.split("\n"), start=1):
+    for number, raw in enumerate(blank_comments(text).split("\n"), start=1):
         heading = HEADING_RE.match(raw)
         if heading:
             section = heading.group("title").strip()
@@ -252,7 +413,20 @@ class Task:
     priority: str
     depends_on: tuple[str, ...]
     evidence: str
+    #: ``**状态**：`` 里写的原值（可能是空串——那就按勾选框推）
+    status_field: str
+    #: ``**更新**：`` 里记的状态变更时间
+    updated: str
+    #: ``**结论**：`` 里留的中间结论（FR-020）
+    conclusion: str
+    #: ``**截止**：`` 里记的预期完成日期；没有就不算超期
+    due: str
     line: int
+
+    @property
+    def status(self) -> str:
+        """四种状态之一。没写 ``**状态**`` 就按勾选框推。"""
+        return self.status_field or ("完成" if self.done else "未开始")
 
     @property
     def has_source(self) -> bool:
@@ -269,7 +443,7 @@ def parse_tasks(text: str) -> list[Task]:
     """解析任务清单。只认 ``- [ ] **T001** …`` 这种行。"""
     tasks: list[Task] = []
     milestone = ""
-    for number, raw in enumerate(text.split("\n"), start=1):
+    for number, raw in enumerate(blank_comments(text).split("\n"), start=1):
         heading = HEADING_RE.match(raw)
         if heading:
             # 只把二级标题当里程碑；### 归它下面管
@@ -297,6 +471,10 @@ def parse_tasks(text: str) -> list[Task]:
                     sorted(set(TASK_ID_RE.findall(fields.get("依赖", ""))))
                 ),
                 evidence=fields.get("证据", ""),
+                status_field=fields.get("状态", ""),
+                updated=fields.get("更新", ""),
+                conclusion=fields.get("结论", ""),
+                due=fields.get("截止", ""),
                 line=number,
             )
         )
@@ -336,8 +514,26 @@ def check_tasks(text: str) -> list[Problem]:
                         level=LEVEL_WARN,
                     )
                 )
+        if task.status_field and task.status_field not in TASK_STATUSES:
+            problems.append(
+                Problem(
+                    TASKS_FILE,
+                    f"{task.id} 的状态取值不合法：{task.status_field!r}",
+                    f"从 {'、'.join(TASK_STATUSES)} 中选一个",
+                    level=LEVEL_WARN,
+                )
+            )
+        elif task.status == "完成" and not task.done:
+            problems.append(
+                Problem(
+                    TASKS_FILE,
+                    f"{task.id} 写着「完成」，但勾选框没打勾",
+                    "两处说的不一致；用 pm-agent track 或手工改齐",
+                    level=LEVEL_WARN,
+                )
+            )
 
-    for number, raw in enumerate(text.split("\n"), start=1):
+    for number, raw in enumerate(blank_comments(text).split("\n"), start=1):
         stripped = raw.strip()
         if TASK_LINE_RE.match(raw) or not SUSPECT_TASK_RE.match(stripped):
             continue
@@ -350,6 +546,23 @@ def check_tasks(text: str) -> list[Problem]:
             )
         )
     return problems
+
+
+def bigram_overlap(sentence: str, title: str) -> int:
+    """两段中文之间共享的字符片段数——不引依赖的最简匹配。
+
+    为什么不用整串包含：中文没有空格，任务是"做回看页"而人说的是"回看页这块卡住了"，
+    整串匹配会漏。字符 bigram 重叠够用，而且零依赖（plan §11 定的办法）。
+
+    标题很短（一个字符）时退回整串比较。
+    """
+    text = title.strip()
+    if not text:
+        return 0
+    if len(text) < 2:
+        return 1 if text in sentence else 0
+    grams = {text[index : index + 2] for index in range(len(text) - 1)}
+    return sum(1 for gram in grams if gram in sentence)
 
 
 def _split_task(rest: str) -> tuple[str, dict[str, str], str]:
@@ -523,6 +736,14 @@ def meta_from_dict(data: dict[str, Any]) -> ProjectMeta:
         created=coerce_iso_date(data["created"]) or str(data["created"]).strip(),
         status=str(data["status"]).strip(),
         learning_goals=[str(item).strip() for item in data.get("learning_goals") or []],
+        acknowledged_risks=[
+            str(item).strip() for item in data.get("acknowledged_risks") or []
+        ],
+        skill_usage=[
+            {str(key): str(value) for key, value in dict(item).items()}
+            for item in data.get("skill_usage") or []
+            if isinstance(item, dict)
+        ],
     )
 
 
@@ -567,7 +788,11 @@ def check_workspace(root: Path) -> list[Problem]:
     project_path = root / PROJECT_FILE
     if not project_path.is_file():
         problems.append(
-            Problem(PROJECT_FILE, "缺少项目元信息文件", "运行 pm-agent init 生成")
+            Problem(
+                PROJECT_FILE,
+                "缺少项目元信息文件",
+                "这大概不是一个项目目录；运行 pm-agent init 生成，第一次用就先看 pm-agent guide",
+            )
         )
     else:
         text, read_problem = _read_text(project_path)

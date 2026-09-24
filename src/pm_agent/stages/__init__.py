@@ -11,6 +11,8 @@ import yaml
 from ..errors import PMAgentError
 
 _FIELDS = ("title", "purpose", "inputs", "outputs")
+# 讲解用字段：不是必需的，但没有它们就答不上"为什么这么做"（FR-048 / FR-049）
+_EXPLAIN_FIELDS = ("basis", "tradeoffs", "alternatives")
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +23,12 @@ class Stage:
     purpose: str
     inputs: str
     outputs: str
+    # 依据：对应哪几条需求、哪几份文件
+    basis: str = ""
+    # 取舍：这么做的代价与收益
+    tradeoffs: str = ""
+    # 被放弃的备选方案，以及放弃的理由
+    alternatives: str = ""
 
 
 def _stages() -> tuple[tuple[str, Stage], ...]:
@@ -52,6 +60,11 @@ def _stages() -> tuple[tuple[str, Stage], ...]:
                 )
             values[field] = value.strip()
 
+        for field in _EXPLAIN_FIELDS:
+            value = raw.get(field)
+            if isinstance(value, str) and value.strip():
+                values[field] = value.strip()
+
         stages.append((key, Stage(**values)))
 
     return tuple(stages)
@@ -75,13 +88,22 @@ def get_stage(key: str) -> Stage:
         ) from exc
 
 
-def announce(key: str) -> str:
-    """把阶段说明渲染为三行：目的、输入、预期产出。"""
+def announce(key: str, *, explain: bool = False) -> str:
+    """把阶段说明渲染成三行（目的 / 输入 / 预期产出），外加一行依据。
+
+    ``explain=True`` 时再补上取舍与被放弃的备选——FR-049 的讲解模式。
+    """
     stage = get_stage(key)
-    return "\n".join(
-        (
-            f"{stage.title}｜目的：{stage.purpose}",
-            f"输入：{stage.inputs}",
-            f"预期产出：{stage.outputs}",
-        )
-    )
+    lines = [
+        f"{stage.title}｜目的：{stage.purpose}",
+        f"输入：{stage.inputs}",
+        f"预期产出：{stage.outputs}",
+    ]
+    if stage.basis:
+        lines.append(f"依据：{stage.basis}")
+    if explain:
+        if stage.tradeoffs:
+            lines.append(f"取舍：{stage.tradeoffs}")
+        if stage.alternatives:
+            lines.append(f"被放弃的备选：{stage.alternatives}")
+    return "\n".join(lines)

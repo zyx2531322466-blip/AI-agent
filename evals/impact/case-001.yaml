@@ -1,0 +1,7 @@
+# 金样本：改一条需求之前，影响面要能列全（SC-006）。
+# 夹具里 FR-001 有 3 条任务（其中 1 条已完成）、2 条下游任务——全都要列出来。
+requirement: FR-001
+direct_tasks: [T001, T002, T003]
+downstream_tasks: [T004, T005]
+done_tasks: [T001]
+expect_review: true

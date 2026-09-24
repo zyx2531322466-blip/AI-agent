@@ -1,0 +1,21 @@
+# 金样本：一个没受过训练的人，照着 guide 走一遍就该能走通（SC-010）。
+# 每一行都要是一个真命令——写进引导里的命令必须存在、且能跑出 `--help`。
+steps:
+  - command: init
+    expect: 从零建一个空项目（建自己的项目时最该先被指到的一条）
+  - command: demo
+    expect: 建出一个能 resume 的示范项目
+  - command: resume
+    expect: 说清上次到哪、现在能动手的是哪些
+  - command: tasks
+    expect: 看到任务与就绪排序
+  - command: risks
+    expect: 看到风险，或明确说没有
+  - command: report
+    expect: 一份四类分组的汇报
+  - command: skills
+    expect: 看到能力单元，或给出建议
+  - command: skill
+    expect: 看一个能力单元的理由（它的项目目录要用 -C 给）
+  - command: guide
+    expect: 每一步都能查得到

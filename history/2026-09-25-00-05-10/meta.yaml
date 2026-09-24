@@ -1,0 +1,9 @@
+created: '2026-09-25T00:05:10'
+reason: T001 → 完成
+files:
+- path: tasks.md
+  existed: true
+  backup: before/tasks.md
+  added: 1
+  removed: 1
+undone: '2026-09-25T00:26:19'

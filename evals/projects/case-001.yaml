@@ -1,0 +1,10 @@
+# 金样本：两个项目必须互不串味（SC-009）。
+# 总览是只读扫描——扫完两个项目的文件一个字节都不该变。
+projects:
+  - name: 甲项目
+    goal: 做甲的事
+    task: 甲项目独有的任务
+  - name: 乙项目
+    goal: 做乙的事
+    task: 乙项目独有的任务
+shared_skill: requirement-review

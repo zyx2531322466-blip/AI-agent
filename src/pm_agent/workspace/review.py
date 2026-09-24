@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 
 from ..errors import WorkspaceError
 from . import format as fmt
@@ -22,6 +23,24 @@ from .store import Project
 
 #: 评审稿落在 reports/ 下（六个数据目录之一）
 REVIEW_DIR = "reports"
+
+#: 回填后原话里若还留着这些字眼，说明那句该顺一顺了（只提示，不代改）
+STALE_WORDS = ("还没定", "待定", "不确定", "不知道", "TBD", "待确认")
+
+
+@dataclass(frozen=True)
+class ClarificationAnswer:
+    """一次"回答待澄清问题"的结果——给人看的摘要（不含变更本身）。"""
+
+    question: str
+    source: str
+    line: int
+    #: 回填之后那一行长什么样
+    after: str
+    #: 如果这条需求此前被确认过、这次因内容变化而作废，记下编号
+    unconfirmed: str = ""
+    #: 回填后原话里还留着的"没定"类字眼
+    stale: tuple[str, ...] = ()
 
 
 def parse_confirmed(spec_text: str) -> list[str]:
@@ -69,6 +88,150 @@ def confirm_requirement(
         fmt.SPEC_FILE,
         set_frontmatter_line(raw, fmt.CONFIRMED_KEY, rendered),
         reason=reason or f"确认 {requirement_id}",
+    )
+
+
+def clarifications_of(project: Project) -> list[fmt.Clarification]:
+    """当前还没答案的问题（按出现顺序，序号从 1 起）。"""
+    return fmt.parse_clarifications(project.spec_text())
+
+
+def pick_clarification(
+    items: list[fmt.Clarification], target: str | None
+) -> fmt.Clarification:
+    """按序号或来源定位一处待澄清（不指定时只允许只剩一条的情形）。
+
+    为什么允许两种定位方式：人手里拿着的是"问题本身"，而脚本里拿着的是编号。
+    两条路都留着，但**多解就报错、绝不猜**——回填错地方等于给规范写进一条错结论。
+    """
+    if not items:
+        raise WorkspaceError(
+            "规范里没有待澄清的问题",
+            hint="用 pm-agent questions 看一眼；没有问题就不用回填",
+        )
+
+    def listing() -> str:
+        return "\n".join(
+            f"  {index}. [{item.source}] {item.text}"
+            for index, item in enumerate(items, start=1)
+        )
+
+    if target is None:
+        if len(items) == 1:
+            return items[0]
+        raise WorkspaceError(
+            f"现在有 {len(items)} 处待澄清，得说清回答的是哪一处",
+            hint="用 --for 指定（序号或来源都行）：\n" + listing(),
+        )
+
+    text = target.strip()
+    if text.isdigit():
+        index = int(text)
+        if not 1 <= index <= len(items):
+            raise WorkspaceError(
+                f"没有第 {index} 处待澄清（现在共 {len(items)} 处）",
+                hint="序号从 1 起，用 pm-agent questions 看一遍",
+            )
+        return items[index - 1]
+
+    matched = [item for item in items if item.source == text]
+    if not matched:
+        matched = [item for item in items if text in item.source]
+    if not matched:
+        raise WorkspaceError(
+            f"没有来自「{text}」的待澄清问题",
+            hint="现有的来源：\n" + listing(),
+        )
+    if len(matched) > 1:
+        raise WorkspaceError(
+            f"「{text}」下有 {len(matched)} 处待澄清，得说清是哪一处",
+            hint="改用序号：\n"
+            + "\n".join(
+                f"  {items.index(item) + 1}. [{item.source}] {item.text}"
+                for item in matched
+            ),
+        )
+    return matched[0]
+
+
+def resolve_clarification(
+    project: Project,
+    *,
+    answer: str,
+    target: str | None = None,
+    reason: str | None = None,
+) -> tuple[Change, ClarificationAnswer]:
+    """产出一份"把结论回填进规范"的变更（**不落盘**），附一份给人看的摘要。
+
+    回填的写法分两种位置（都在同一行内完成，**行级手术**，其余逐字不动）：
+
+    - 问题在**需求条目里**（``- **FR-003** …[待澄清] 问题？``）：
+      把 ``[待澄清] 问题？`` 换成 ``**结论**：<答案>``；
+    - 问题在**"待澄清问题"那一节**（``- [待澄清] 问题？``）：
+      去掉标记、保留问题，追加 ``**结论**：<答案>``——问过什么必须留痕。
+
+    还有一条连带处理：如果这条需求此前被**确认**过，它的内容变了，确认随之失效——
+    同一次变更里把它从 ``confirmed`` 里摘掉，免得"内容已改、状态还写着确认过"。
+    """
+    body = answer.strip()
+    if not body:
+        raise WorkspaceError("结论不能是空的", hint="写清这处待澄清定成了什么")
+
+    raw = project.spec_text()
+    items = fmt.parse_clarifications(raw)
+    item = pick_clarification(items, target)
+
+    lines = raw.split("\n")
+    index = item.line - 1
+    if index >= len(lines):
+        raise WorkspaceError(
+            f"第 {item.line} 行已经不在规范里了", hint="规范被改过；重跑一次 questions 看看"
+        )
+    original = lines[index]
+    marker_at = original.find(fmt.CLARIFICATION_MARKER)
+    if marker_at < 0:
+        raise WorkspaceError(
+            f"第 {item.line} 行里找不到 {fmt.CLARIFICATION_MARKER} 标记",
+            hint="规范被改过；重跑一次 questions 看看",
+        )
+
+    # 去掉标记本身，把它后面紧跟着的冒号也一并去掉；**问题原样留着**——
+    # "问过什么"和"后来定成什么"要同时看得到（FR-054）。
+    head = original[:marker_at].rstrip()
+    asked = original[marker_at + len(fmt.CLARIFICATION_MARKER) :]
+    asked = asked.strip().lstrip("：:").strip()
+    kept = f"{head} {asked}".strip()
+    tail = f"{kept} **结论**：{body}".strip()
+    lines[index] = tail
+    updated = "\n".join(lines)
+
+    unconfirmed = ""
+    requirement_id = (
+        item.source
+        if fmt.REQUIREMENT_LINE_RE.match(tail) and item.source.startswith("FR-")
+        else ""
+    )
+    if requirement_id:
+        confirmed = parse_confirmed(updated)
+        if requirement_id in confirmed:
+            rest = [item for item in confirmed if item != requirement_id]
+            rendered = "[" + ", ".join(rest) + "]"
+            updated = set_frontmatter_line(updated, fmt.CONFIRMED_KEY, rendered)
+            unconfirmed = requirement_id
+
+    stale = tuple(word for word in STALE_WORDS if word in tail)
+    change = project.prepare_write(
+        fmt.SPEC_FILE,
+        updated,
+        reason=reason or f"回填待澄清（{item.source}）",
+    )
+    return change, ClarificationAnswer(
+        question=item.text,
+        source=item.source,
+        line=item.line,
+        after=tail,
+        unconfirmed=unconfirmed,
+        stale=stale,
     )
 
 

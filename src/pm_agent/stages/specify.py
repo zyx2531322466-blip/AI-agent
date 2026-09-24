@@ -23,7 +23,7 @@ from ..model.echo import ECHO_MARKER
 from ..prompts import render as render_prompt
 from ..workspace import format as fmt
 from ..workspace.changes import Change
-from ..workspace.files import render_markdown, split_frontmatter
+from ..workspace.files import clean_model_reply, render_markdown, split_frontmatter
 from ..workspace.store import Project
 
 # FR-002 要求规范至少包含的五项。校验按关键词判断——模型可以用自己的措辞
@@ -62,7 +62,7 @@ def draft_spec(
     ]
 
     reply = provider.complete(messages)
-    return SpecDraft(text=_clean(reply), source=provider.describe())
+    return SpecDraft(text=clean_model_reply(reply), source=provider.describe())
 
 
 def check_draft(draft: SpecDraft) -> list[fmt.Problem]:
@@ -142,22 +142,5 @@ def prepare_spec_change(
 
 
 def _clean(reply: str) -> str:
-    """把模型回复清理成干净的正文。
-
-    模型常干两件多余的事：自己加上 frontmatter、把整篇包在代码围栏里。
-    两者混进 spec.md 都会让人看到不该有的东西，先剥掉。
-    """
-    _, body, _ = split_frontmatter(reply)
-    return _strip_code_fence(body).strip("\n") + "\n"
-
-
-def _strip_code_fence(text: str) -> str:
-    """去掉最外层的一对代码围栏（如果有）。"""
-    fence = "`" * 3
-    stripped = text.strip()
-    if not (stripped.startswith(fence) and stripped.endswith(fence)):
-        return text
-    first_newline = stripped.find("\n")
-    if first_newline == -1:
-        return text
-    return stripped[first_newline + 1 : -len(fence)]
+    """保留这个名字给测试用；清理规则本身在 ``workspace/files.clean_model_reply``。"""
+    return clean_model_reply(reply)

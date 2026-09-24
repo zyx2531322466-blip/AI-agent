@@ -38,6 +38,19 @@ from .review import (
     parse_confirmed,
     unconfirmed_requirements,
 )
+from .skills import (
+    SkillSuggestion,
+    get_skill,
+    list_skills,
+    load_reference,
+    load_skill,
+    record_usage,
+    revise_skill,
+    save_skill,
+    share_skill,
+    suggest_skills,
+    usage_summary,
+)
 
 __all__ = [
     "Project",
@@ -61,6 +74,17 @@ __all__ = [
     "parse_confirmed",
     "build_review_document",
     "export_review",
+    "SkillSuggestion",
+    "list_skills",
+    "get_skill",
+    "load_skill",
+    "load_reference",
+    "suggest_skills",
+    "save_skill",
+    "revise_skill",
+    "share_skill",
+    "record_usage",
+    "usage_summary",
     "Handoff",
     "list_handoffs",
     "new_handoff",

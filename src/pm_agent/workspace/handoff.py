@@ -27,9 +27,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import FormatError, WorkspaceError
+from . import changes
 from . import format as fmt
 from .files import render_markdown, split_frontmatter
 from .store import Project
+from .tasks import ready_tasks
 
 SESSIONS_DIR = "sessions"
 
@@ -341,7 +343,120 @@ def new_handoff(
     return handoff
 
 
-def write_handoff(project: Project, handoff: Handoff) -> Path:
+def draft_handoff(project: Project, *, moment: dt.datetime | None = None) -> Handoff:
+    """按项目当前状态起草一份交接记录（三要素自动填好，人再改）。
+
+    填进去的都是**事实**：任务状态统计、进行中/阻塞的任务、就绪任务、待澄清清单。
+    "这一轮做了什么"留给人补——那件事只有人知道，模型猜不出来，程序更猜不出来。
+
+    所以这个草稿的作用是：**把机械的部分填掉，把需要人的部分留白**。
+    """
+    tasks = project.tasks()
+    counts = {
+        status: sum(1 for task in tasks if task.status == status)
+        for status in fmt.TASK_STATUSES
+    }
+    active = [task for task in tasks if task.status in ("进行中", "阻塞")]
+    questions = fmt.parse_clarifications(project.spec_text())
+
+    state_lines = [
+        f"任务：完成 {counts['完成']} / 进行中 {counts['进行中']} / "
+        f"阻塞 {counts['阻塞']} / 未开始 {counts['未开始']}。"
+    ]
+    for task in active:
+        state_lines.append(f"- {task.id}（{task.status}）{task.title}")
+        if task.conclusion and task.conclusion != "无":
+            # 中间结论要出现在这里，新会话才接得上（FR-020）
+            state_lines.append(f"  - 上次留下的结论：{task.conclusion}")
+
+    ready = ready_tasks(project)
+    next_steps = (
+        "\n".join(f"- {task.id}（{task.priority or '未定优先级'}）{task.title}" for task in ready[:3])
+        or "- 没有就绪任务：先看 pm-agent tasks --coverage 补齐依赖"
+    )
+    open_questions = (
+        "\n".join(
+            f"- [待澄清] {item.text}（来自 {item.source}）" for item in questions
+        )
+        or "无"
+    )
+
+    return new_handoff(
+        project,
+        state="\n".join(state_lines),
+        next_steps=next_steps,
+        open_questions=open_questions,
+        did="（这一轮做了什么：手工补一句，不要编）",
+        references="spec.md（规范）、tasks.md（任务清单）",
+        moment=moment,
+    )
+
+
+def find_conflicts(project: Project, handoff: Handoff) -> list[fmt.Problem]:
+    """交接记录说的和项目实际对不上时报出来（FR-018）。
+
+    查三件事，严重程度不同：
+
+    1. 记录里提到的**任务编号**是否还存在 —— error：记录指向了不存在的东西；
+    2. 记录里提到的**需求编号**是否还存在 —— error，同上；
+    3. 记录之后有没有**新的变更** —— warn：记录可能已经过期。
+
+    前两条是"两份事实打架"，必须让人裁决；第三条只是"可能过期"，提示一下即可。
+    """
+    where = f"{SESSIONS_DIR}/{handoff.session}.md"
+    body = "\n".join(
+        [
+            handoff.state,
+            handoff.next_steps,
+            handoff.open_questions,
+            handoff.did,
+            handoff.references,
+        ]
+    )
+    problems: list[fmt.Problem] = []
+
+    known_tasks = {task.id for task in project.tasks()}
+    for task_id in sorted(set(fmt.TASK_ID_RE.findall(body))):
+        if task_id not in known_tasks:
+            problems.append(
+                fmt.Problem(
+                    where,
+                    f"记录里提到的 {task_id} 已经不在任务清单里",
+                    "先确认是记错了，还是那个任务被删了——别急着往下做",
+                )
+            )
+
+    known_requirements = {item.id for item in project.requirements()}
+    for requirement_id in sorted(set(fmt.FR_ID_RE.findall(body))):
+        if requirement_id not in known_requirements:
+            problems.append(
+                fmt.Problem(
+                    where,
+                    f"记录里提到的 {requirement_id} 已经不在规范里",
+                    "先确认是记错了，还是那条需求被改/删了",
+                )
+            )
+
+    newer = [
+        entry.name
+        for entry in changes.history_entries(project)
+        if entry.name > handoff.session
+    ]
+    if newer:
+        problems.append(
+            fmt.Problem(
+                where,
+                f"这份记录之后还有 {len(newer)} 次变更（最近一次 {newer[0]}）",
+                "摘要可能已经过期；看完当前状态再决定要不要重写一份",
+                level=fmt.LEVEL_WARN,
+            )
+        )
+    return problems
+
+
+def write_handoff(
+    project: Project, handoff: Handoff, *, moment: dt.datetime | None = None
+) -> Path:
     """写入一份交接记录，返回文件路径。
 
     已存在同名记录时**拒绝覆盖**——"绝不覆盖"是原则 4 的底线；要新写一份，
@@ -359,5 +474,5 @@ def write_handoff(project: Project, handoff: Handoff) -> Path:
     change = project.prepare_write(
         relative, render_handoff(handoff), reason=f"写入交接记录 {handoff.session}"
     )
-    project.apply(change)
+    project.apply(change, moment=moment)
     return target

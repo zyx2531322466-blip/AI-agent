@@ -28,7 +28,7 @@ import difflib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 import yaml
 
@@ -174,17 +174,71 @@ class UndoResult:
 # ---- 准备变更 ----------------------------------------------------------
 
 
+def merge(changes: Iterable[Change], *, reason: str = "") -> Change:
+    """把多条变更并成**一条**（同样只是数据，还没落盘）。
+
+    为什么要并：一次动作如果踩了两份文件（比如"写下交付物"＋"把任务推进为进行中"），
+    它们就该是**一个**记录——不然撤回时要撤两下，中间还会留下"文件退了、状态没退"的
+    半拉子状态。
+
+    同一路径出现两次直接报错：那种情况该由调用方先合并内容，而不是让先写后写互相覆盖。
+    """
+    entries: list[ChangeEntry] = []
+    seen: set[str] = set()
+    for change in changes:
+        for entry in change.entries:
+            if entry.path in seen:
+                raise WorkspaceError(
+                    f"合并变更时同一个文件出现两次：{entry.path}",
+                    hint="先合并内容再准备变更；别让同一次动作对同一个文件写两遍",
+                )
+            seen.add(entry.path)
+            entries.append(entry)
+    if not entries:
+        raise WorkspaceError("没有可合并的变更", hint="至少给一条变更")
+    return Change(
+        entries=tuple(entries),
+        reason=reason or next((c.reason for c in changes if c.reason), ""),
+    )
+
+
 def prepare_write(
     project: Project, relative: str, text: str, *, reason: str = ""
 ) -> Change:
     """准备一次写入：**读现状、产出预览，但不碰磁盘**。"""
-    normalized = _normalize(relative)
-    target = project.path(*normalized.split("/"))
-    before = target.read_bytes() if target.is_file() else None
-    return Change(
-        entries=(ChangeEntry(path=normalized, before_bytes=before, after=text),),
-        reason=reason,
-    )
+    return prepare_writes(project, ((relative, text),), reason=reason)
+
+
+def prepare_writes(
+    project: Project,
+    files: Iterable[tuple[str, str]],
+    *,
+    reason: str = "",
+) -> Change:
+    """准备一次**多文件**写入：同样只读现状、只产出预览。
+
+    为什么要有它：`work` 一次会同时落"任务该交付的文件"和"这次产出的记录"。
+    它们必须**同属一条变更**——否则撤回时会只退回一半，留下一个算不上完整的中间状态。
+
+    路径一律走 ``Project.path``（它拒绝越出项目目录），所以"只写项目内的相对路径"
+    这条约束在这里是**结构性**的，不是靠调用方自觉。
+    """
+    entries: list[ChangeEntry] = []
+    seen: set[str] = set()
+    for relative, text in files:
+        normalized = _normalize(relative)
+        if normalized in seen:
+            raise WorkspaceError(
+                f"同一次变更里出现了两次：{normalized}",
+                hint="一个文件只该写一次；把重复的那处合并掉",
+            )
+        seen.add(normalized)
+        target = project.path(*normalized.split("/"))
+        before = target.read_bytes() if target.is_file() else None
+        entries.append(ChangeEntry(path=normalized, before_bytes=before, after=text))
+    if not entries:
+        raise WorkspaceError("这次变更一个文件都没有", hint="至少给一个文件再准备变更")
+    return Change(entries=tuple(entries), reason=reason)
 
 
 # ---- 落盘与撤回 --------------------------------------------------------
@@ -207,12 +261,26 @@ def apply_change(
 
     entry_dir = _new_entry_dir(project, moment or dt.datetime.now())
     _write_backups(entry_dir, pending)
-    _write_meta(entry_dir, pending, reason=change.reason, created=moment)
 
+    # 记下这次**新建了哪些目录**：撤回时把它们收回去，
+    # 否则退回之后会留下一堆空目录——那就不叫"回到写入前"了。
+    created_dirs: list[str] = []
     for entry in pending:
         target = project.path(*entry.path.split("/"))
+        folder = target.parent
+        while folder != project.root and not folder.exists():
+            created_dirs.append(str(folder.relative_to(project.root)).replace("\\", "/"))
+            folder = folder.parent
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(entry.after_bytes)
+
+    _write_meta(
+        entry_dir,
+        pending,
+        reason=change.reason,
+        created=moment,
+        created_dirs=tuple(dict.fromkeys(created_dirs)),
+    )
 
     return ApplyResult(
         entry_dir=entry_dir,
@@ -264,6 +332,14 @@ def undo_last(project: Project, *, moment: dt.datetime | None = None) -> UndoRes
 
     meta["undone"] = (moment or dt.datetime.now()).isoformat(timespec="seconds")
     _write_meta_file(target_dir, meta)
+
+    # 收回这次新建的目录（从深到浅，空的才删；非空说明里面还有别的东西，留着）
+    for relative in sorted(meta.get("created_dirs") or [], key=len, reverse=True):
+        folder = project.path(*str(relative).split("/"))
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
 
     return UndoResult(
         entry_dir=target_dir, restored=tuple(restored), removed=tuple(removed)
@@ -337,6 +413,7 @@ def _write_meta(
     *,
     reason: str,
     created: dt.datetime | None,
+    created_dirs: tuple[str, ...] = (),
 ) -> None:
     meta: dict[str, Any] = {
         "created": (created or dt.datetime.now()).isoformat(timespec="seconds"),
@@ -352,6 +429,8 @@ def _write_meta(
             for entry in entries
         ],
     }
+    if created_dirs:
+        meta["created_dirs"] = list(created_dirs)
     _write_meta_file(entry_dir, meta)
 
 

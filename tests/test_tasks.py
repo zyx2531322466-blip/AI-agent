@@ -87,7 +87,10 @@ def test_parse_counts_the_whole_repo_task_file() -> None:
     text = (Path(__file__).parents[1] / "tasks.md").read_text(encoding="utf-8")
     tasks = fmt.parse_tasks(text)
 
-    assert len(tasks) == 76
+    # 不写死条数：那样每加一条任务都得改测试。断言的是**完整性**——
+    # 每一条勾选行都要被解析出来，不能有默默漏掉的。
+    checklist = [line for line in text.split("\n") if line.startswith("- [")]
+    assert len(tasks) == len(checklist), "勾选行与解析出的任务数对不上，有行被漏掉了"
     assert sum(1 for task in tasks if task.parallel) == 15
     assert all(task.standard for task in tasks), "每条任务都该有完成标准"
 

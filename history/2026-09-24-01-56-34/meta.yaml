@@ -1,0 +1,9 @@
+created: '2026-09-24T01:56:34'
+reason: 记录决策：破坏性操作只作用于自建的示范项目
+files:
+- path: decisions/2026-09-24-破坏性操作只作用于自建的示范项目.md
+  existed: false
+  backup: null
+  added: 23
+  removed: 0
+undone: '2026-09-24T01:56:45'

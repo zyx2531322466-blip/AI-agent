@@ -22,6 +22,8 @@ from pm_agent.workspace.review import (
     confirm_requirement,
     export_review,
     parse_confirmed,
+    pick_clarification,
+    resolve_clarification,
     unconfirmed_requirements,
 )
 from pm_agent.workspace.store import Project, create_project
@@ -55,6 +57,186 @@ def project(tmp_path: Path) -> Project:
         project.prepare_write(fmt.SPEC_FILE, SPEC_WITH_ITEMS, reason="铺测试数据")
     )
     return project
+
+
+# ---- T084 把结论回填进规范（FR-054）------------------------------------- #
+
+
+def test_answer_fills_a_question_back_into_the_requirement(project: Project) -> None:
+    """条目里的待澄清：标记去掉、**问题原样保留**、后面记上结论。"""
+    change, resolved = resolve_clarification(
+        project, answer="字段含标题与是否完成", target="FR-001"
+    )
+    project.apply(change)
+
+    line = project.spec_text().split("\n")[resolved.line - 1]
+    assert "[待澄清]" not in line
+    assert "待办要有哪些字段？" in line, "当初问的是什么要留着"
+    assert "**结论**：字段含标题与是否完成" in line
+
+
+def test_answer_fills_a_question_in_the_questions_section(project: Project) -> None:
+    """问题清单里的待澄清：同样去标记、留问题、追加结论。"""
+    change, resolved = resolve_clarification(
+        project, answer="不做，v1 范围外", target="待澄清问题"
+    )
+    project.apply(change)
+
+    line = project.spec_text().split("\n")[resolved.line - 1]
+    assert line.startswith("- 要不要做提醒功能？"), line
+    assert "[待澄清]" not in line
+    assert "**结论**：不做，v1 范围外" in line
+
+
+def test_answering_removes_it_from_the_open_list(project: Project) -> None:
+    """回填后这一处不再算未决——这正是这条命令存在的理由。"""
+    before = fmt.parse_clarifications(project.spec_text())
+    assert len(before) == 2
+
+    change, _ = resolve_clarification(project, answer="字段含标题与是否完成", target="1")
+    project.apply(change)
+
+    after = fmt.parse_clarifications(project.spec_text())
+    assert [item.text for item in after] == ["要不要做提醒功能？"]
+
+
+def test_other_lines_are_untouched(project: Project) -> None:
+    """行级手术：只改那一行，其余逐字不动。"""
+    before = project.spec_text().split("\n")
+
+    change, resolved = resolve_clarification(project, answer="字段含标题与是否完成", target="FR-001")
+    project.apply(change)
+
+    after = project.spec_text().split("\n")
+    assert len(before) == len(after)
+    assert [
+        (index, line)
+        for index, line in enumerate(before, start=1)
+        if index != resolved.line
+    ] == [
+        (index, line)
+        for index, line in enumerate(after, start=1)
+        if index != resolved.line
+    ]
+
+
+def test_changing_a_confirmed_requirement_invalidates_its_confirmation(
+    project: Project,
+) -> None:
+    """内容变了，之前那次"看过了、可以照它做"就失效——同一次变更里摘掉它。"""
+    project.apply(confirm_requirement(project, "FR-001"))
+    assert parse_confirmed(project.spec_text()) == ["FR-001"]
+
+    change, resolved = resolve_clarification(project, answer="字段含标题与是否完成", target="FR-001")
+    project.apply(change)
+
+    assert resolved.unconfirmed == "FR-001"
+    assert parse_confirmed(project.spec_text()) == []
+
+
+def test_answering_is_undoable(project: Project) -> None:
+    """回填也走"预览 → 确认 → 可撤回"（FR-034 / FR-035）。"""
+    before = project.spec_text()
+
+    change, _ = resolve_clarification(project, answer="字段含标题与是否完成", target="FR-001")
+    project.apply(change)
+    assert project.spec_text() != before
+
+    project.undo_last()
+    assert project.spec_text() == before
+    assert len(fmt.parse_clarifications(project.spec_text())) == 2
+
+
+# ---- T085 定位：序号 / 来源 / 多解与无解 -------------------------------- #
+
+
+def test_pick_by_index_and_by_source(project: Project) -> None:
+    items = fmt.parse_clarifications(project.spec_text())
+
+    assert pick_clarification(items, "1").source == "FR-001"
+    assert pick_clarification(items, "FR-001").text == "待办要有哪些字段？"
+    assert pick_clarification(items, "待澄清问题").text == "要不要做提醒功能？"
+
+
+def test_pick_without_target_needs_exactly_one(project: Project) -> None:
+    items = fmt.parse_clarifications(project.spec_text())
+
+    with pytest.raises(WorkspaceError) as excinfo:
+        pick_clarification(items, None)
+    assert "得说清回答的是哪一处" in excinfo.value.message
+
+    assert pick_clarification(items[:1], None).source == "FR-001"
+
+
+def test_pick_reports_unknown_target_and_bad_index(project: Project) -> None:
+    items = fmt.parse_clarifications(project.spec_text())
+
+    with pytest.raises(WorkspaceError):
+        pick_clarification(items, "FR-999")
+    with pytest.raises(WorkspaceError) as excinfo:
+        pick_clarification(items, "9")
+    assert "没有第 9 处" in excinfo.value.message
+
+
+def test_empty_answer_is_refused(project: Project) -> None:
+    with pytest.raises(WorkspaceError):
+        resolve_clarification(project, answer="   ", target="FR-001")
+
+
+def test_stale_wording_is_flagged(project: Project) -> None:
+    """回填后原话里还留着"还没定"这类字眼，就提示一句。"""
+    project.apply(
+        project.prepare_write(
+            fmt.SPEC_FILE,
+            SPEC_WITH_ITEMS.replace(
+                "能记一条待办。[待澄清] 待办要有哪些字段？",
+                "标题长度上限还没定。[待澄清] 最长多少字？",
+            ),
+            reason='造一句"还没定"',
+        )
+    )
+    project = Project.open(project.root)
+
+    _, resolved = resolve_clarification(project, answer="80 字", target="FR-001")
+
+    assert "还没定" in resolved.stale
+
+
+def test_cli_questions_then_clarify(tmp_path: Path) -> None:
+    """端到端：questions 里带序号 → clarify 按序号回答 → 未决清单少一条。"""
+    target = tmp_path / "demo"
+    created = create_project(target, name="演示项目", goal="记待办").project
+    created.apply(created.prepare_write(fmt.SPEC_FILE, SPEC_WITH_ITEMS, reason="铺测试数据"))
+
+    listed = runner.invoke(app, ["questions", str(target)])
+    assert listed.exit_code == 0
+    assert "序号" in listed.stdout and "FR-001" in listed.stdout
+
+    answered = runner.invoke(
+        app,
+        ["clarify", "字段含标题与是否完成", "--for", "FR-001", "--path", str(target), "--yes"],
+    )
+    assert answered.exit_code == 0, answered.stdout
+    assert "已回填" in answered.stdout
+
+    left = runner.invoke(app, ["questions", str(target)])
+    assert "要不要做提醒功能？" in left.stdout
+    assert "待办要有哪些字段" not in left.stdout
+
+
+def test_cli_clarify_can_be_cancelled(tmp_path: Path) -> None:
+    target = tmp_path / "demo"
+    created = create_project(target, name="演示项目", goal="记待办").project
+    created.apply(created.prepare_write(fmt.SPEC_FILE, SPEC_WITH_ITEMS, reason="铺测试数据"))
+    before = (target / fmt.SPEC_FILE).read_text(encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["clarify", "字段含标题与是否完成", "--for", "FR-001", "--path", str(target)],
+        input="n\n",
+    )
+
+    assert "已取消" in result.stdout
+    assert (target / fmt.SPEC_FILE).read_text(encoding="utf-8") == before
 
 
 # ---- T013 待澄清 --------------------------------------------------------
@@ -198,7 +380,7 @@ def test_cli_questions_confirm_and_review(tmp_path: Path) -> None:
     assert confirmed.exit_code == 0, confirmed.stdout
     assert "已确认" in confirmed.stdout
 
-    reviewed = runner.invoke(app, ["review", "--path", str(target)])
+    reviewed = runner.invoke(app, ["review", str(target)])
     assert reviewed.exit_code == 0, reviewed.stdout
     assert "已写出" in reviewed.stdout
     assert list((target / "reports").glob("评审稿-*.md"))

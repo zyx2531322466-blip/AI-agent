@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -97,9 +98,32 @@ class Project:
         """准备一次写入：产出预览，**不碰磁盘**（FR-034）。"""
         return changes.prepare_write(self, relative, text, reason=reason)
 
-    def apply(self, change: "Change") -> "ApplyResult":
-        """落盘；写入前把原内容存进 ``history/``（FR-035）。"""
-        return changes.apply_change(self, change)
+    def prepare_meta_change(self, *, reason: str = "更新项目元信息", **fields: object) -> "Change":
+        """改 ``project.yaml`` 里的字段，产出一份待确认的变更。
+
+        元数据归程序维护（和 spec.md 的 frontmatter 一个道理），所以这里统一按
+        当前 meta 重新渲染整个文件——它没有"人写的内容"需要保护。
+        """
+        data = self.meta.to_dict()
+        data.update(fields)
+        return self.prepare_write(
+            fmt.PROJECT_FILE,
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            reason=reason,
+        )
+
+    def apply(self, change: "Change", *, moment: dt.datetime | None = None) -> "ApplyResult":
+        """落盘；写入前把原内容存进 ``history/``（FR-035）。
+
+        ``moment`` 只在需要可复现的场合给（比如建示范项目）：
+        历史目录名带时间戳，不给就按现在算。
+        """
+        result = changes.apply_change(self, change, moment=moment)
+        # project.yaml 可能刚被改过：把内存里的元信息刷新一下。
+        # 不刷新的话，同一进程里后续的判断（比如"这条预警处置过没有"）还会用旧值。
+        if any(entry.path == fmt.PROJECT_FILE for entry in change.changed_entries):
+            self.meta = load_project_meta(self.root / fmt.PROJECT_FILE)
+        return result
 
     def undo_last(self) -> "UndoResult":
         """撤回最近一次尚未撤回的变更。"""
